@@ -4,8 +4,10 @@ services:
     env_file: ./backend/.env
     ports:
       - "8000:8000"
+      - "127.0.0.1:6080:6080"  # noVNC: http://localhost:6080/vnc.html
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    shm_size: "1gb"
     restart: unless-stopped
 
   frontend:

@@ -22,7 +22,7 @@ RUN apt-get update \
 COPY chrome-wrapper.sh /tmp/chrome-wrapper.sh
 RUN curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
     && apt-get update \
-    && apt-get install -y --no-install-recommends /tmp/chrome.deb fonts-liberation \
+    && apt-get install -y --no-install-recommends /tmp/chrome.deb fonts-liberation fonts-dejavu-core fonts-inter fonts-noto-color-emoji xvfb x11vnc novnc websockify \
     && rm -rf /var/lib/apt/lists/* /tmp/chrome.deb \
     && mv /opt/google/chrome/chrome /opt/google/chrome/chrome-real \
     && mv /tmp/chrome-wrapper.sh /opt/google/chrome/chrome \
@@ -38,6 +38,12 @@ RUN python -c "from selenium.webdriver.common.selenium_manager import SeleniumMa
 
 COPY app ./app
 
-EXPOSE 8000
+COPY start-display.sh /usr/local/bin/start-display.sh
+RUN chmod +x /usr/local/bin/start-display.sh
+ENV DISPLAY=:99
+
+EXPOSE 8000 6080
+
+ENTRYPOINT ["/usr/local/bin/start-display.sh"]
 
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
