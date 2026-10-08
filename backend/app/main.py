@@ -19,12 +19,12 @@ from app.models.screenshot import Screenshot
 from app.models.failure_diagnostic import FailureDiagnostic
 from app.models.schedule import Schedule
 
-from app.api.auth import router as auth_router
-from app.api.projects import router as projects_router
-from app.api.project_files import router as project_files_router
-from app.api.runs import router as runs_router
-from app.api.run_results import router as run_results_router
-from app.api.schedules import router as schedules_router
+from app.routers.auth import router as auth_router
+from app.routers.projects import router as projects_router
+from app.routers.project_files import router as project_files_router
+from app.routers.runs import router as runs_router
+from app.routers.run_results import router as run_results_router
+from app.routers.schedules import router as schedules_router
 from app.services import scheduler_service
 
 

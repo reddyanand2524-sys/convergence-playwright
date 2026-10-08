@@ -1,7 +1,10 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
-DATABASE_URL = (
+# Docker/Linux cannot use Windows trusted auth; set DATABASE_URL there.
+DATABASE_URL = os.environ.get("DATABASE_URL") or (
     "mssql+pyodbc://@DESKTOP-2I11G5V/Convergence"
     "?driver=ODBC+Driver+18+for+SQL+Server"
     "&trusted_connection=yes"
