@@ -3395,3 +3395,63 @@ table { max-width: 100%; }
 .home-result-status.is-fail,
 .home-result-status.is-error { color: var(--color-critical-light); }
 .cv-metric.is-critical .cv-metric-label { color: var(--text-secondary); }
+
+/* Live browser viewer (read-only noVNC embed on the Run page) */
+.cv-live {
+  margin: 8px 0 20px;
+  border: 1px solid color-mix(in srgb, var(--status-running) 35%, transparent);
+  border-radius: var(--radius-card);
+  background: var(--color-ink-2);
+  overflow: hidden;
+}
+.cv-live-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 16px 4px;
+}
+.cv-live-head h4 { display: flex; align-items: center; gap: 8px; margin: 0; }
+.cv-live-note { font-size: 0.8125rem; opacity: 0.75; }
+.cv-live-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 16px 12px;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  opacity: 0.8;
+}
+.cv-live-warning svg { flex: none; margin-top: 2px; }
+.cv-live-state { margin: 0; padding: 0 16px 16px; }
+.cv-live-state.is-error { color: var(--status-failed, inherit); }
+/* The lite noVNC page has one 25px status bar; push it out of view so only the
+   browser shows. 28px leaves margin for font differences. */
+.cv-live-frame {
+  --cv-live-bar: 28px;
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  min-height: 320px;
+  max-height: 80vh;
+  width: 100%;
+  background: #000;
+}
+.cv-live-frame iframe {
+  position: absolute;
+  top: calc(var(--cv-live-bar) * -1);
+  left: 0;
+  width: 100%;
+  height: calc(100% + var(--cv-live-bar));
+  border: 0;
+}
+.cv-live-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-ink-2);
+}

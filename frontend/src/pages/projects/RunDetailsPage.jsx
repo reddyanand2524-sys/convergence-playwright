@@ -8,6 +8,7 @@ import RunStateMessage from "../../components/RunStateMessage.jsx";
 import CancelRunControl from "../../components/CancelRunControl.jsx";
 import RetryRunControl from "../../components/RetryRunControl.jsx";
 import ReportActions from "../../components/ReportActions.jsx";
+import LiveBrowserViewer from "../../components/LiveBrowserViewer.jsx";
 import StartRunControl from "../../components/StartRunControl.jsx";
 import useRunPolling from "../../hooks/useRunPolling.js";
 import { getRun } from "../../services/runsApi.js";
@@ -127,6 +128,8 @@ export default function RunDetailsPage() {
           {run.status === "RUNNING" && (
             <LoadingState type="converge" label="Run in progress — results appear when it completes" className="cv-run-loader" />
           )}
+
+          <LiveBrowserViewer run={run} />
 
           {retriedFrom && (
             <p className="home-notice is-success" role="status">
