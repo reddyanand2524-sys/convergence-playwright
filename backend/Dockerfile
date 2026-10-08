@@ -28,13 +28,22 @@ RUN curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chro
     && mv /tmp/chrome-wrapper.sh /opt/google/chrome/chrome \
     && chmod +x /opt/google/chrome/chrome
 
+# Microsoft Edge + Firefox ESR (Selenium runs). Edge gets the same root/container
+# wrapper as Chrome. Both come from the package manager, so nothing is downloaded
+# at run time.
+COPY edge-wrapper.sh /tmp/edge-wrapper.sh
+RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/repos/edge stable main"         > /etc/apt/sources.list.d/microsoft-edge.list     && apt-get update     && apt-get install -y --no-install-recommends microsoft-edge-stable firefox-esr     && rm -rf /var/lib/apt/lists/*     && mv /opt/microsoft/msedge/msedge /opt/microsoft/msedge/msedge-real     && mv /tmp/edge-wrapper.sh /opt/microsoft/msedge/msedge     && chmod +x /opt/microsoft/msedge/msedge     && ln -s /usr/bin/firefox-esr /usr/local/bin/firefox
+
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-
-# Pre-fetch chromedriver so runs don't depend on network at execution time.
-RUN python -c "from selenium.webdriver.common.selenium_manager import SeleniumManager as S; print(S().binary_paths(['--browser','chrome']))"
+# Pre-fetch the drivers matching the installed browsers into Selenium Manager's cache
+# (the build fails if a Chromium driver doesn't match its browser), then forbid
+# Selenium Manager from downloading anything at run time.
+COPY prefetch-drivers.py /tmp/prefetch-drivers.py
+RUN python /tmp/prefetch-drivers.py && rm /tmp/prefetch-drivers.py
+ENV SE_OFFLINE=true     SE_AVOID_BROWSER_DOWNLOAD=true
 
 COPY app ./app
 
