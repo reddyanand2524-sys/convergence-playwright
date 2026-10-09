@@ -1,16 +1,23 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
 from app.database import get_db
 from app.models.project import Project
 from app.models.user import User
+from app.services import project_deletion_service
 from app.schemas.project import (
     CreateProjectRequest,
     ProjectResponse,
     UpdateProjectRequest,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -125,3 +132,52 @@ def update_project(
     db.refresh(project)
 
     return project
+
+@router.delete(
+    "/{project_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_project(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently deletes the caller's project and everything it owns (files,
+    runs, results, screenshots, diagnostics, schedules). 404 if the project does
+    not exist or belongs to someone else; 409 if a run is currently RUNNING.
+    See app/services/project_deletion_service.py for the coordination rules."""
+    project = _get_owned_project(project_id, db, current_user)
+
+    try:
+        project_deletion_service.delete_project(db, project)
+    except project_deletion_service.ProjectNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+    except project_deletion_service.ActiveRunsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This project has a run in progress. Cancel it and wait for it to "
+                "stop before deleting the project."
+            ),
+        ) from exc
+    except IntegrityError as exc:
+        # A foreign-key conflict means rows appeared while deleting (e.g. a
+        # scheduler tick or a retry created a run). Nothing was deleted.
+        db.rollback()
+        logger.exception("Project %s deletion hit a foreign-key conflict", project_id)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "The project changed while it was being deleted, so nothing was "
+                "deleted. Please try again."
+            ),
+        ) from exc
+    except SQLAlchemyError:
+        # Anything else is a real server error: undo, keep the SQL Server error
+        # in the log, and let it surface as a 500 (never report success).
+        db.rollback()
+        logger.exception("Project %s deletion failed", project_id)
+        raise

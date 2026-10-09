@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
-import { useOutletContext } from "react-router-dom";
-import { Pencil } from "lucide-react";
+import { useNavigate, useOutletContext } from "react-router-dom";
+import { Pencil, Trash2 } from "lucide-react";
 
-import { updateProject } from "../../services/projectsApi.js";
+import { deleteProject, updateProject } from "../../services/projectsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 import { BROWSER_OPTIONS, FREQUENCY_OPTIONS } from "../../constants/projectOptions.js";
 
@@ -60,6 +60,12 @@ export default function ProjectConfigurationPage() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState(null);
   const inFlight = useRef(false);
+
+  const navigate = useNavigate();
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const deleteInFlight = useRef(false);
 
   const dirty = FIELDS.some((field) => draft[field].trim() !== project[field]);
 
@@ -134,6 +140,33 @@ export default function ProjectConfigurationPage() {
     } finally {
       inFlight.current = false;
       setSaving(false);
+    }
+  }
+
+  function openDelete() {
+    setDeleteError("");
+    setDeleteOpen(true);
+  }
+
+  // The project is only removed from the UI after the backend confirms (204).
+  async function confirmDelete() {
+    if (deleteInFlight.current) return;
+    deleteInFlight.current = true;
+    setDeleting(true);
+    setDeleteError("");
+
+    try {
+      await deleteProject(project.id);
+      await reloadProjects();
+      navigate("/tests", { replace: true });
+    } catch (err) {
+      setDeleteError(
+        err?.status === 0
+          ? "Unable to connect to the backend."
+          : `Unable to delete project. ${describeError(err, "Project not found. It may already have been deleted.")}`
+      );
+      deleteInFlight.current = false;
+      setDeleting(false);
     }
   }
 
@@ -225,6 +258,64 @@ export default function ProjectConfigurationPage() {
             </button>
           </div>
         </form>
+      )}
+
+      {!editing && (
+        <section className="home-danger-zone" aria-labelledby="danger-zone-title">
+          <div>
+            <h4 id="danger-zone-title">Delete project</h4>
+            <p>Permanently delete this project and everything in it. This cannot be undone.</p>
+          </div>
+          <button className="home-secondary-button is-danger-outline" type="button" onClick={openDelete}>
+            <Trash2 size={16} aria-hidden="true" />
+            Delete Project
+          </button>
+        </section>
+      )}
+
+      {deleteOpen && (
+        <div
+          className="home-modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deleting) setDeleteOpen(false);
+          }}
+        >
+          <section
+            className="home-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="delete-project-title"
+            aria-describedby="delete-project-desc"
+          >
+            <h2 id="delete-project-title">Delete {project.name}?</h2>
+            <p id="delete-project-desc">
+              This will permanently delete the project and all of its associated files, runs,
+              historical results, screenshots, failure diagnostics and schedules. This cannot be
+              undone.
+            </p>
+
+            {deleteError && <p className="home-notice is-error" role="alert">{deleteError}</p>}
+
+            <div className="home-modal-actions">
+              <button
+                className="home-secondary-button"
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="home-primary-button is-danger"
+                type="button"
+                disabled={deleting}
+                onClick={confirmDelete}
+              >
+                {deleting ? "Deleting..." : "Delete Project"}
+              </button>
+            </div>
+          </section>
+        </div>
       )}
     </div>
   );

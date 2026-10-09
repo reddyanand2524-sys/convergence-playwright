@@ -3455,3 +3455,19 @@ table { max-width: 100%; }
   justify-content: center;
   background: var(--color-ink-2);
 }
+
+/* Project configuration: delete-project danger zone */
+.home-danger-zone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 28px;
+  padding: 20px 24px;
+  border: 1px solid color-mix(in srgb, var(--color-critical) 35%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--color-critical) 6%, transparent);
+}
+.home-danger-zone h4 { margin: 0 0 4px; }
+.home-danger-zone p { margin: 0; font-size: 0.875rem; opacity: 0.8; }

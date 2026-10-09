@@ -27,3 +27,10 @@ export function updateProject(projectId, payload) {
     json: payload,
   });
 }
+
+// DELETE /projects/{project_id}  -> 204
+// Permanently deletes the project and its files, runs, results, screenshots,
+// diagnostics and schedules. 409 if a run is currently in progress.
+export function deleteProject(projectId) {
+  return authedFetch(`/projects/${projectId}`, { method: "DELETE" });
+}
