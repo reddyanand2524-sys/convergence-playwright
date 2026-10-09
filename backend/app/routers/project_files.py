@@ -8,13 +8,14 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
 from app.database import get_db
 from app.models.project import Project
 from app.models.project_file import ProjectFile
+from app.models.test_result import TestResult
 from app.models.user import User
 from app.schemas.project_file import (
     ProjectFileContentResponse,
@@ -218,10 +219,20 @@ def delete_project_file(
     project = _get_owned_project(project_id, db, current_user)
     project_file = _get_owned_file(project, file_id, db)
 
-    # Only this one ProjectFile row is removed — the Project, its other
-    # files, and every existing Run record are left completely untouched.
-    # A future Run simply won't find this file anymore when it queries
-    # project_files; past Runs are historical records and don't reference
-    # file rows at all, so nothing about them changes.
+    # Only this one ProjectFile row is removed - the Project, its other
+    # files and every Run record are left untouched.
+    #
+    # Past executions DO reference the file row: test_results.project_file_id
+    # is a foreign key to project_files.id. Deleting a file that has ever been
+    # run therefore failed with a SQL Server FK violation (HTTP 500). The
+    # column is nullable, result persistence already stores NULL when no file
+    # matches, and each test_result keeps its own file_name/nodeid, so only the
+    # link to this file row is cleared (in the same transaction); no result,
+    # step, screenshot or diagnostic is deleted.
+    db.execute(
+        update(TestResult)
+        .where(TestResult.project_file_id == project_file.id)
+        .values(project_file_id=None)
+    )
     db.delete(project_file)
     db.commit()
