@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     smtp_password: str
     smtp_from_email: str
     test_execution_timeout_seconds: int = 120
+    # Typed step values (send_keys/type) are NOT persisted or returned by default:
+    # they are stored as a "***" marker, because a field's name does not tell
+    # whether what was typed is secret. Set PERSIST_TYPED_VALUES=true to keep them
+    # (secret-named fields and known secrets are still masked).
+    persist_typed_values: bool = False
 
     class Config:
         env_file = ".env"

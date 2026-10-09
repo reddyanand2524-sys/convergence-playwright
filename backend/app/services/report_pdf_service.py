@@ -51,6 +51,25 @@ def _esc(value) -> str:
     return escape(str(value))
 
 
+def _analysis_flowables(a, style) -> list:
+    """Failure-analysis block; every user-derived string goes through _esc()."""
+    out = [
+        Paragraph(
+            f"<b>Failure analysis:</b> {_esc(a.failure_title)} "
+            f"({_esc(a.failure_category)}, confidence: {_esc(a.confidence)})",
+            style,
+        ),
+        Paragraph(_esc(a.summary), style),
+        Paragraph(f"<b>Likely cause (hypothesis, not confirmed):</b> {_esc(a.likely_cause)}", style),
+        Paragraph("<b>Evidence (recorded facts):</b>", style),
+    ]
+    out += [Paragraph(f"&bull; <b>{_esc(e.label)}:</b> {_esc(e.value)}", style) for e in a.evidence]
+    out.append(Paragraph("<b>Recommended actions (suggestions):</b>", style))
+    out += [Paragraph(f"{i}. {_esc(x)}", style) for i, x in enumerate(a.recommended_actions, 1)]
+    out.append(Spacer(1, 6))
+    return out
+
+
 def render_pdf_report(report: ReportData) -> bytes:
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -184,6 +203,7 @@ def render_pdf_report(report: ReportData) -> bytes:
 
         if test.failure:
             f = test.failure
+            a = test.analysis
             story.append(
                 Paragraph(
                     f"<b>Exception:</b> {_esc(f.exception_type) if f.exception_type else 'Unknown'}",
@@ -191,7 +211,9 @@ def render_pdf_report(report: ReportData) -> bytes:
                 )
             )
             if f.exception_message:
-                story.append(Paragraph(f"<b>Message:</b> {_esc(f.exception_message)}", error_style))
+                story.append(
+                    Paragraph(f"<b>Message:</b> {_esc(a.exception_message if a else f.exception_message)}", error_style)
+                )
             if f.source_file:
                 story.append(
                     Paragraph(
@@ -200,10 +222,13 @@ def render_pdf_report(report: ReportData) -> bytes:
                     )
                 )
             if f.source_line:
-                story.append(Paragraph(_esc(f.source_line), error_style))
+                story.append(Paragraph(_esc(a.source_line if a else f.source_line), error_style))
             if f.raw_traceback:
-                story.append(Paragraph(_esc(f.raw_traceback), error_style))
+                story.append(Paragraph(_esc(a.traceback if a and a.traceback else f.raw_traceback), error_style))
             story.append(Spacer(1, 6))
+
+        if test.analysis:
+            story.extend(_analysis_flowables(test.analysis, error_style))
 
         all_screenshots = list(test.screenshots)
         for step in test.steps:

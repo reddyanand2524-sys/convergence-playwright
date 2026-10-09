@@ -23,11 +23,21 @@ from sqlalchemy.orm import Session
 
 from app.models.failure_diagnostic import FailureDiagnostic
 from app.models.project import Project
+from app.models.project_file import ProjectFile
 from app.models.run import Run
 from app.models.run_result import RunResult
 from app.models.screenshot import Screenshot
 from app.models.step_result import StepResult
 from app.models.test_result import TestResult
+from app.services import failure_analysis_service
+from app.services.failure_analysis_service import FailureAnalysis
+from app.services.failure_sanitizer import (
+    collect_known_secrets,
+    collect_typed_values,
+    sanitize_failure_fields,
+    sanitize_identifier,
+    sanitize_step,
+)
 
 
 @dataclass
@@ -62,6 +72,7 @@ class StepData:
     status: str
     duration_seconds: float | None
     error: str | None
+    occurred_at: datetime | None = None
     screenshots: list[ScreenshotData] = field(default_factory=list)
 
 
@@ -80,6 +91,8 @@ class TestData:
     steps: list[StepData] = field(default_factory=list)
     screenshots: list[ScreenshotData] = field(default_factory=list)
     failure: FailureData | None = None
+    # Same rule-based analysis the results API returns (None for passing tests).
+    analysis: FailureAnalysis | None = None
 
 
 @dataclass
@@ -184,6 +197,11 @@ def build_report_data(db: Session, run: Run, project: Project) -> ReportData:
             size_bytes=shot.size_bytes,
         )
 
+    # Literals the uploaded scripts pass to secret-named fields (masked in all output).
+    script_secrets = collect_known_secrets(
+        db.scalars(select(ProjectFile.file_content).where(ProjectFile.project_id == project.id))
+    )
+
     total_duration = 0.0
     total_steps = 0
     passed_steps = 0
@@ -195,6 +213,13 @@ def build_report_data(db: Session, run: Run, project: Project) -> ReportData:
     for test_row in test_rows:
         if test_row.duration_seconds:
             total_duration += test_row.duration_seconds
+
+        # Script literals plus every value this test typed (older rows still hold
+        # the typed values, which are then masked everywhere they surface).
+        known_secrets = tuple(dict.fromkeys((
+            *script_secrets,
+            *collect_typed_values((s.action, s.value) for s in steps_by_test.get(test_row.id, [])),
+        )))
 
         steps: list[StepData] = []
         for step_row in steps_by_test.get(test_row.id, []):
@@ -209,20 +234,27 @@ def build_report_data(db: Session, run: Run, project: Project) -> ReportData:
             ]
             screenshot_count += len(step_shots)
 
+            # Sanitized once here, so the HTML, Excel and PDF reports (which all
+            # read StepData) show the same masked values as the API.
+            step_target, step_value, step_error = sanitize_step(
+                step_row.target, step_row.value, step_row.error, known_secrets,
+                action=step_row.action,
+            )
             steps.append(
                 StepData(
                     id=step_row.id,
                     sequence_index=step_row.sequence_index,
                     step_number=step_row.step_number,
                     display_name=_display_name(
-                        step_row.action, step_row.target, step_row.value
+                        step_row.action, step_target, step_value
                     ),
                     action=step_row.action,
-                    target=step_row.target,
-                    value=step_row.value,
+                    target=step_target,
+                    value=step_value,
                     status=step_row.status,
                     duration_seconds=step_row.duration_seconds,
-                    error=step_row.error,
+                    error=step_error,
+                    occurred_at=step_row.occurred_at,
                     screenshots=step_shots,
                 )
             )
@@ -236,23 +268,32 @@ def build_report_data(db: Session, run: Run, project: Project) -> ReportData:
         failure_data = None
         if failure_row:
             failure_count += 1
+            # Sanitized (stored rows untouched) so every report format shows the
+            # same redacted text as the API.
+            exc_type, exc_message, src_line, traceback_text = sanitize_failure_fields(
+                failure_row.exception_type,
+                failure_row.exception_message,
+                failure_row.source_line,
+                failure_row.raw_traceback,
+                known_secrets,
+            )
             failure_data = FailureData(
-                exception_type=failure_row.exception_type,
-                exception_message=failure_row.exception_message,
+                exception_type=exc_type,
+                exception_message=exc_message,
                 source_file=failure_row.source_file,
                 source_line_number=failure_row.source_line_number,
-                source_line=failure_row.source_line,
-                raw_traceback=failure_row.raw_traceback,
+                source_line=src_line,
+                raw_traceback=traceback_text,
             )
 
         tests.append(
             TestData(
                 id=test_row.id,
-                nodeid=test_row.nodeid,
+                nodeid=sanitize_identifier(test_row.nodeid, known_secrets),
                 project_file_id=test_row.project_file_id,
                 file_name=test_row.file_name,
                 class_name=test_row.class_name,
-                method_name=test_row.method_name,
+                method_name=sanitize_identifier(test_row.method_name, known_secrets),
                 status=test_row.status,
                 duration_seconds=test_row.duration_seconds,
                 started_at=test_row.started_at,
@@ -260,6 +301,18 @@ def build_report_data(db: Session, run: Run, project: Project) -> ReportData:
                 steps=steps,
                 screenshots=test_level_shots,
                 failure=failure_data,
+                analysis=failure_analysis_service.safe_analyze(
+                    failure_analysis_service.input_from_records(
+                        test_row,
+                        steps_by_test.get(test_row.id, []),
+                        screenshots_by_step,
+                        screenshots_by_test.get(test_row.id, []),
+                        failure_row,
+                        run.browser,
+                        run.completed_at,
+                        known_secrets,
+                    )
+                ),
             )
         )
 

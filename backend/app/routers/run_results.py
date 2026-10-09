@@ -6,6 +6,7 @@ from app.core.dependencies import get_current_user
 from app.database import get_db
 from app.models.failure_diagnostic import FailureDiagnostic
 from app.models.project import Project
+from app.models.project_file import ProjectFile
 from app.models.run import Run
 from app.models.run_result import RunResult
 from app.models.screenshot import Screenshot
@@ -13,12 +14,21 @@ from app.models.step_result import StepResult
 from app.models.test_result import TestResult
 from app.models.user import User
 from app.schemas.run_result import (
+    FailureAnalysisSchema,
     FailureDiagnosticSchema,
     RunResultsResponse,
     RunResultsSummarySchema,
     ScreenshotRefSchema,
     StepResultSchema,
     TestResultSchema,
+)
+from app.services import failure_analysis_service
+from app.services.failure_sanitizer import (
+    collect_known_secrets,
+    collect_typed_values,
+    sanitize_failure_fields,
+    sanitize_identifier,
+    sanitize_step,
 )
 from app.services.report_data_service import build_report_data
 from app.services.report_excel_service import render_excel_report
@@ -30,6 +40,13 @@ router = APIRouter(
     prefix="/api/projects",
     tags=["Run Results"],
 )
+
+def _analysis_schema(analysis, screenshot_rows, to_ref) -> FailureAnalysisSchema:
+    schema = FailureAnalysisSchema.model_validate(analysis, from_attributes=True)
+    shot = next((s for s in screenshot_rows if s.id == analysis.screenshot_id), None)
+    schema.failure_screenshot = to_ref(shot) if shot is not None else None
+    return schema
+
 
 _PENDING_STATUSES = ("QUEUED", "RUNNING", "CANCELLED")
 _REPORTABLE_STATUSES = ("COMPLETED", "FAILED")
@@ -105,6 +122,11 @@ def get_run_results(
 
     tests: list[TestResultSchema] = []
     total_duration = 0.0
+    # Literals the uploaded scripts pass to secret-named fields (script source is
+    # stored in the database); masked wherever they surface in this response.
+    script_secrets = collect_known_secrets(
+        db.scalars(select(ProjectFile.file_content).where(ProjectFile.project_id == project.id))
+    )
 
     for test_row in test_rows:
         if test_row.duration_seconds:
@@ -115,6 +137,13 @@ def get_run_results(
             .where(StepResult.test_result_id == test_row.id)
             .order_by(StepResult.sequence_index)
         ).all()
+
+        # Script literals plus every value this test typed (older rows still hold
+        # the typed values, which are then masked everywhere they surface).
+        known_secrets = tuple(dict.fromkeys((
+            *script_secrets,
+            *collect_typed_values((s.action, s.value) for s in step_rows),
+        )))
 
         screenshot_rows = db.scalars(
             select(Screenshot).where(Screenshot.test_result_id == test_row.id)
@@ -139,17 +168,22 @@ def get_run_results(
 
         steps: list[StepResultSchema] = []
         for step_row in step_rows:
+            # Stored rows (including historical ones) are sanitized on output.
+            step_target, step_value, step_error = sanitize_step(
+                step_row.target, step_row.value, step_row.error, known_secrets,
+                action=step_row.action,
+            )
             steps.append(
                 StepResultSchema(
                     id=step_row.id,
                     sequence_index=step_row.sequence_index,
                     step_number=step_row.step_number,
                     action=step_row.action,
-                    target=step_row.target,
-                    value=step_row.value,
+                    target=step_target,
+                    value=step_value,
                     status=step_row.status,
                     duration_seconds=step_row.duration_seconds,
-                    error=step_row.error,
+                    error=step_error,
                     screenshots=[
                         _to_screenshot_ref(s)
                         for s in screenshots_by_step.get(step_row.id, [])
@@ -163,26 +197,49 @@ def get_run_results(
 
         failure_schema = None
         if failure_row:
+            # Same sanitizing as the analysis (stored rows stay untouched): the
+            # raw exception text / source line can contain typed secrets or
+            # run-directory paths.
+            exc_type, exc_message, src_line, traceback_text = sanitize_failure_fields(
+                failure_row.exception_type,
+                failure_row.exception_message,
+                failure_row.source_line,
+                failure_row.raw_traceback,
+                known_secrets,
+            )
             failure_schema = FailureDiagnosticSchema(
-                exception_type=failure_row.exception_type,
-                exception_message=failure_row.exception_message,
+                exception_type=exc_type,
+                exception_message=exc_message,
                 source_file=failure_row.source_file,
                 source_line_number=failure_row.source_line_number,
-                source_line=failure_row.source_line,
-                raw_traceback=failure_row.raw_traceback,
+                source_line=src_line,
+                raw_traceback=traceback_text,
             )
+
+        # Computed on read from the records above (never stored); safe_analyze
+        # logs and returns None on any unexpected failure so results still load.
+        analysis_schema = None
+        analysis = failure_analysis_service.safe_analyze(
+            failure_analysis_service.input_from_records(
+                test_row, step_rows, screenshots_by_step, test_level_screenshots,
+                failure_row, run.browser, run.completed_at, known_secrets,
+            )
+        )
+        if analysis is not None:
+            analysis_schema = _analysis_schema(analysis, screenshot_rows, _to_screenshot_ref)
 
         tests.append(
             TestResultSchema(
                 id=test_row.id,
-                nodeid=test_row.nodeid,
+                nodeid=sanitize_identifier(test_row.nodeid, known_secrets),
                 file_name=test_row.file_name,
                 class_name=test_row.class_name,
-                method_name=test_row.method_name,
+                method_name=sanitize_identifier(test_row.method_name, known_secrets),
                 status=test_row.status,
                 duration_seconds=test_row.duration_seconds,
                 steps=steps,
                 failure=failure_schema,
+                analysis=analysis_schema,
                 screenshots=[
                     _to_screenshot_ref(s) for s in test_level_screenshots
                 ],

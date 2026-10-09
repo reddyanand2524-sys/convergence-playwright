@@ -59,6 +59,14 @@ def _autosize(ws: Worksheet, widths: list[int]) -> None:
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = width
 
 
+def _failed_step_text(analysis) -> str:
+    step = analysis.failed_step
+    if step is None:
+        return ""
+    number = step.step_number if step.step_number is not None else step.sequence_index
+    return f"#{number} {step.action}" + (f" {step.target}" if step.target else "")
+
+
 def render_excel_report(report: ReportData) -> bytes:
     wb = Workbook()
 
@@ -169,27 +177,42 @@ def render_excel_report(report: ReportData) -> bytes:
             "Source File",
             "Source Line Number",
             "Source Line",
+            "Failure Category",
+            "Confidence",
+            "Summary",
+            "Likely Cause (hypothesis)",
+            "Evidence",
+            "Recommended Actions",
+            "Failed Step",
         ],
     )
     for test in report.tests:
-        if not test.failure:
+        if not test.failure and not test.analysis:
             continue
         f = test.failure
+        a = test.analysis
         row_idx = ws_failures.max_row + 1
         ws_failures.append(
             [
                 test.id,
                 _sanitize_cell_value(test.nodeid),
-                _sanitize_cell_value(f.exception_type) if f.exception_type else "",
-                _sanitize_cell_value(f.exception_message) if f.exception_message else "",
-                _sanitize_cell_value(f.source_file) if f.source_file else "",
-                f.source_line_number,
-                _sanitize_cell_value(f.source_line) if f.source_line else "",
+                _sanitize_cell_value(f.exception_type if f else a.exception_type) or "",
+                _sanitize_cell_value(a.exception_message if a else f.exception_message) or "",
+                _sanitize_cell_value(f.source_file if f else a.file_name) or "",
+                f.source_line_number if f else a.line_number,
+                _sanitize_cell_value(a.source_line if a else f.source_line) or "",
+                a.failure_category if a else "",
+                a.confidence if a else "",
+                _sanitize_cell_value(a.summary) if a else "",
+                _sanitize_cell_value(a.likely_cause) if a else "",
+                _sanitize_cell_value(chr(10).join(f"{e.label}: {e.value}" for e in a.evidence)) if a else "",
+                _sanitize_cell_value(chr(10).join(f"{i}. {x}" for i, x in enumerate(a.recommended_actions, 1))) if a else "",
+                _sanitize_cell_value(_failed_step_text(a)) if a else "",
             ]
         )
-        ws_failures.cell(row=row_idx, column=4).alignment = _WRAP
-        ws_failures.cell(row=row_idx, column=7).alignment = _WRAP
-    _autosize(ws_failures, [8, 45, 20, 50, 25, 10, 40])
+        for col in (4, 7, 10, 11, 12, 13, 14):
+            ws_failures.cell(row=row_idx, column=col).alignment = _WRAP
+    _autosize(ws_failures, [8, 45, 20, 50, 25, 10, 40, 24, 12, 50, 60, 60, 60, 40])
 
     # --- Screenshots sheet (metadata only, no embedded images) ---
     ws_shots = wb.create_sheet("Screenshots")

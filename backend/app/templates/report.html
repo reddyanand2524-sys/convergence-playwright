@@ -21,6 +21,10 @@
   .test-block { border: 1px solid #ccc; border-radius: 6px; margin-bottom: 18px; padding: 12px; }
   .step-row.status-FAIL { background: #fde8e8; }
   .step-row.status-PASS { background: #eefaf0; }
+  .analysis-block { background: #f3f7ff; border: 1px solid #b4c4e0; border-radius: 4px; padding: 10px; margin-top: 10px; }
+  .analysis-block h4 { margin: 0 0 6px; }
+  .analysis-block ul, .analysis-block ol { margin: 4px 0 8px 18px; padding: 0; }
+  .analysis-note { color: #555; font-size: 12px; }
   .failure-block { background: #fff3f3; border: 1px solid #e0b4b4; border-radius: 4px; padding: 10px; margin-top: 10px; }
   .screenshots { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .screenshots img { max-width: 220px; border: 1px solid #ccc; border-radius: 4px; }
@@ -101,16 +105,40 @@
     {% if test.failure %}
     <div class="failure-block">
       <strong>Exception:</strong> {{ test.failure.exception_type if test.failure.exception_type else "Unknown" }}<br>
-      <strong>Message:</strong> {{ test.failure.exception_message if test.failure.exception_message else "" }}<br>
+      <strong>Message:</strong> {{ test.analysis.exception_message if test.analysis else (test.failure.exception_message if test.failure.exception_message else "") }}<br>
       {% if test.failure.source_file %}
       <strong>Location:</strong> {{ test.failure.source_file }}:{{ test.failure.source_line_number if test.failure.source_line_number is not none else "?" }}<br>
       {% endif %}
       {% if test.failure.source_line %}
-      <pre>{{ test.failure.source_line }}</pre>
+      <pre>{{ test.analysis.source_line if test.analysis else test.failure.source_line }}</pre>
       {% endif %}
       {% if test.failure.raw_traceback %}
-      <pre>{{ test.failure.raw_traceback }}</pre>
+      <pre>{{ test.analysis.traceback if test.analysis and test.analysis.traceback else test.failure.raw_traceback }}</pre>
       {% endif %}
+    </div>
+    {% endif %}
+
+    {% if test.analysis %}
+    {% set a = test.analysis %}
+    <div class="analysis-block">
+      <h4>Failure analysis: {{ a.failure_title }} <span class="analysis-note">({{ a.failure_category }}, confidence: {{ a.confidence }})</span></h4>
+      <p>{{ a.summary }}</p>
+      <p><strong>Likely cause (hypothesis, not confirmed):</strong> {{ a.likely_cause }}</p>
+      <p class="analysis-note">{{ a.confidence_note }}</p>
+      <strong>Evidence (recorded facts):</strong>
+      <ul>
+        {% for item in a.evidence %}<li><strong>{{ item.label }}:</strong> {{ item.value }}</li>{% endfor %}
+      </ul>
+      {% if a.failed_step %}
+      <p><strong>Failed step:</strong> #{{ a.failed_step.step_number if a.failed_step.step_number is not none else a.failed_step.sequence_index }} {{ a.failed_step.action }}{% if a.failed_step.target %} {{ a.failed_step.target }}{% endif %}
+        {% if a.last_successful_step %}&mdash; last successful step: #{{ a.last_successful_step.step_number if a.last_successful_step.step_number is not none else a.last_successful_step.sequence_index }} {{ a.last_successful_step.action }}{% endif %}</p>
+      {% endif %}
+      {% if a.page_url %}<p><strong>Last navigation target:</strong> {{ a.page_url }}<br><span class="analysis-note">{{ a.page_url_source }}</span></p>{% endif %}
+      {% if test.analysis_screenshot %}<p><strong>Failure screenshot:</strong> {{ test.analysis_screenshot }} (shown in this report)</p>{% endif %}
+      <strong>Recommended actions (suggestions):</strong>
+      <ol>
+        {% for action in a.recommended_actions %}<li>{{ action }}</li>{% endfor %}
+      </ol>
     </div>
     {% endif %}
 

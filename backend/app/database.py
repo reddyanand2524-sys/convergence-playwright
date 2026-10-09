@@ -14,6 +14,10 @@ DATABASE_URL = os.environ.get("DATABASE_URL") or (
 engine = create_engine(
     DATABASE_URL,
     echo=True,
+    # The SQL echo must not log statement parameters: they include the full
+    # source of uploaded test scripts and recorded step/failure text, which can
+    # contain credentials. Statements are still logged; values are not.
+    hide_parameters=True,
 )
 
 SessionLocal = sessionmaker(

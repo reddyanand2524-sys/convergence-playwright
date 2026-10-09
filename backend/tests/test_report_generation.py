@@ -470,10 +470,13 @@ def test_report_404_cross_user(
     from app.models.project import Project
     from app.models.user import User
 
+    import uuid
+
+    tag = uuid.uuid4().int
     other_user = User(
         full_name="Other User",
-        email="phase7-other-user@example.com",
-        mobile_number="9000000099",
+        email=f"phase7-other-{tag}@example.com",
+        mobile_number=f"9{tag % 10**9:09d}",
         password_hash=hash_password("Password123!"),
         is_active=True,
     )

@@ -129,16 +129,100 @@ def _source_step(action, target="", value=""):
     return before[-1]
 
 
+# ---------------------------------------------------------------------------
+# Screenshot-only redaction of typed fields.
+#
+# Anything a test types may be sensitive, whatever the field is called, so every
+# element that received typed text (and every password input) is blurred for the
+# instant of the capture and restored right after. Nothing is changed
+# permanently: blur is an inline CSS filter (no layout, focus or event effect),
+# the original inline value is kept in a temporary attribute and put back, and
+# restoring runs in a finally block even if the capture fails. The typed text is
+# only ever passed to the page as a script argument; it is never logged here.
+# Stale, hidden or detached elements are skipped silently.
+# ---------------------------------------------------------------------------
+_MAX_TRACKED = 50
+
+_REDACT_ELEMENT_JS = (
+    "var e=arguments[0];"
+    "if(e && !e.hasAttribute('data-cv-redacted')){"
+    "e.setAttribute('data-cv-redacted', e.style.filter || '');"
+    "e.style.filter='blur(7px)';}"
+)
+# Password inputs always; plus any field still holding a typed value (covers fields
+# the page re-rendered, so the tracked element reference went stale).
+_REDACT_PAGE_JS = (
+    "var vals=arguments[0]||[];"
+    "function hide(e){if(e && !e.hasAttribute('data-cv-redacted')){"
+    "e.setAttribute('data-cv-redacted', e.style.filter || '');e.style.filter='blur(7px)';}}"
+    "document.querySelectorAll('input[type=password]').forEach(hide);"
+    "if(vals.length){document.querySelectorAll("
+    "'input,textarea,[contenteditable=\"\"],[contenteditable=\"true\"]').forEach(function(e){"
+    "var v=(e.value!==undefined&&e.value!==null?e.value:e.textContent)||'';"
+    "for(var i=0;i<vals.length;i++){if(vals[i]&&v.indexOf(vals[i])!==-1){hide(e);break;}}});}"
+)
+_RESTORE_JS = (
+    "document.querySelectorAll('[data-cv-redacted]').forEach(function(e){"
+    "e.style.filter=e.getAttribute('data-cv-redacted');e.removeAttribute('data-cv-redacted');});"
+)
+
+
+def _track_typed(element, keys):
+    """Remembers an element that received typed text, and the printable text, so
+    screenshots taken afterwards can redact it. Never raises."""
+    try:
+        if getattr(CUR, "typed_elements", None) is None:
+            CUR.typed_elements = []
+            CUR.typed_values = []
+        if element is not None:
+            CUR.typed_elements.append(element)
+            del CUR.typed_elements[:-_MAX_TRACKED]
+        for key in keys:
+            # Selenium's special keys (Keys.ENTER ...) are non-printable characters.
+            if isinstance(key, str) and len(key) >= 2 and key.isprintable() and key not in CUR.typed_values:
+                CUR.typed_values.append(key)
+        del CUR.typed_values[:-_MAX_TRACKED]
+    except Exception:
+        pass
+
+
+def _redact_typed(driver):
+    for element in list(getattr(CUR, "typed_elements", None) or []):
+        if getattr(element, "parent", None) is not driver:
+            continue
+        try:
+            driver.execute_script(_REDACT_ELEMENT_JS, element)
+        except Exception:
+            pass  # stale / detached / hidden element: skip, never fail the test
+    try:
+        driver.execute_script(_REDACT_PAGE_JS, list(getattr(CUR, "typed_values", None) or []))
+    except Exception:
+        pass
+
+
+def _restore_typed(driver):
+    try:
+        driver.execute_script(_RESTORE_JS)
+    except Exception:
+        pass
+
+
 def shot(driver, label):
     if SCREENSHOT_MODE == "none" or driver is None:
         return ""
+    redacting = False
     try:
         SHOTS_DIR.mkdir(parents=True, exist_ok=True)
         name = f"{len(EVENTS) + 1:04d}_{label}_{int(time.time() * 1000)}.png"
+        redacting = True  # set first: restore must run even if redaction stops half-way
+        _redact_typed(driver)
         driver.save_screenshot(str(SHOTS_DIR / name))
         return name
     except Exception:
         return ""
+    finally:
+        if redacting:
+            _restore_typed(driver)
 
 
 def _record(action, target="", value="", duration=0, status="PASS", error="", screenshot="", step=None):
@@ -154,6 +238,11 @@ def _record(action, target="", value="", duration=0, status="PASS", error="", sc
         "action": step["action"] if step else action,
         "target": step["target"] if step else str(target),
         "value": step["value"] if step else str(value),
+        # The value actually typed at run time. "value" above prefers the Selenium IDE
+        # comment's text when one matches, so a value that came from a fixture or data
+        # module would otherwise never be recorded. This key exists only so the
+        # execution service can mask it everywhere; it is never persisted or shown.
+        "runtime_value": str(value) if (action == "type" and value) else "",
         "status": status,
         "duration": round(duration, 4),
         "error": error,
@@ -170,7 +259,7 @@ def _record(action, target="", value="", duration=0, status="PASS", error="", sc
             pass
 
 
-def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a, k: ""):
+def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a, k: "", before=None):
     if not hasattr(cls, name):
         return
     old = getattr(cls, name)
@@ -182,6 +271,8 @@ def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a,
         target = target_fn(self, a, k)
         value = value_fn(self, a, k)
         step = _source_step(action, target, value)
+        if before is not None:
+            before(self, a, k)  # e.g. remember typed elements before any screenshot is taken
         try:
             result = old(self, *a, **k)
             _record(action, target, value, time.perf_counter() - st, "PASS", step=step)
@@ -252,7 +343,12 @@ for _n, _a in [
         lambda s, a, k: str(a[1]) if len(a) > 1 else "",
     )
 
-_wrap(WebElement, "send_keys", "type", lambda s, a, k: getattr(s, "tag_name", ""), lambda s, a, k: a[0] if a else "")
+_wrap(
+    WebElement, "send_keys", "type",
+    lambda s, a, k: getattr(s, "tag_name", ""),
+    lambda s, a, k: a[0] if a else "",
+    before=lambda s, a, k: _track_typed(s, a),
+)
 _wrap(WebElement, "clear", "clear")
 
 
@@ -615,6 +711,24 @@ def _retry_actionchains_perform(self, *args, **kwargs):
 
 ActionChains.perform = _retry_actionchains_perform
 
+# Text typed through ActionChains is tracked for screenshot redaction too.
+_original_ac_send_keys_to_element = ActionChains.send_keys_to_element
+_original_ac_send_keys = ActionChains.send_keys
+
+
+def _tracked_send_keys_to_element(self, element, *keys_to_send):
+    _track_typed(element, keys_to_send)
+    return _original_ac_send_keys_to_element(self, element, *keys_to_send)
+
+
+def _tracked_send_keys(self, *keys_to_send):
+    _track_typed(None, keys_to_send)
+    return _original_ac_send_keys(self, *keys_to_send)
+
+
+ActionChains.send_keys_to_element = _tracked_send_keys_to_element
+ActionChains.send_keys = _tracked_send_keys
+
 
 # ---------------------------------------------------------------------------
 # pytest hooks — recognized automatically because this module's source is
@@ -622,6 +736,8 @@ ActionChains.perform = _retry_actionchains_perform
 # ---------------------------------------------------------------------------
 def pytest_runtest_setup(item):
     CUR.nodeid = item.nodeid
+    CUR.typed_elements = []  # typed-field redaction state is per test
+    CUR.typed_values = []
 
 
 def pytest_runtest_call(item):

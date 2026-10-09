@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 
 import ResultStatus from "./ResultStatus.jsx";
 import FailureDiagnosticPanel from "./FailureDiagnosticPanel.jsx";
+import FailureAnalysisPanel from "./FailureAnalysisPanel.jsx";
 import ScreenshotThumb from "./ScreenshotThumb.jsx";
 import { formatSeconds } from "../../utils/format.js";
 
@@ -64,7 +65,11 @@ export default function TestResultCard({ test, projectId, runId }) {
             </p>
           )}
 
-          {test.failure && <FailureDiagnosticPanel failure={test.failure} />}
+          {test.analysis ? (
+            <FailureAnalysisPanel analysis={test.analysis} test={test} projectId={projectId} runId={runId} />
+          ) : (
+            test.failure && <FailureDiagnosticPanel failure={test.failure} />
+          )}
 
           {steps.length > 0 ? (
             <ol className="home-steps" aria-label="Steps">

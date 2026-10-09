@@ -27,6 +27,15 @@ _env = Environment(
 assert _env.autoescape("report.html") is True
 
 
+def _screenshot_name(test, analysis):
+    """File name of the screenshot the analysis points at (shown as a reference;
+    the image itself is already embedded in the steps/screenshots sections)."""
+    if analysis is None or analysis.screenshot_id is None:
+        return None
+    shots = list(test.screenshots) + [s for step in test.steps for s in step.screenshots]
+    return next((s.file_name for s in shots if s.id == analysis.screenshot_id), None)
+
+
 def render_html_report(report: ReportData) -> str:
     template = _env.get_template("report.html")
 
@@ -65,6 +74,8 @@ def render_html_report(report: ReportData) -> str:
                 "steps": steps_ctx,
                 "screenshots": [_with_b64(s) for s in test.screenshots],
                 "failure": test.failure,
+                "analysis": test.analysis,
+                "analysis_screenshot": _screenshot_name(test, test.analysis),
             }
         )
 

@@ -21,6 +21,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from app.services.failure_sanitizer import (
+    clean_exception_message,
+    clean_exception_type,
+    has_sensitive_context,
+    redact_source_line,
+)
+
 
 # A pytest traceback frame line usually looks like:
 #   /tmp/run_39_xyz/test_corlink.py:45: in test_corlink_flow
@@ -102,6 +109,8 @@ class TestFailureDiagnostic:
     source_line: str | None
     exception_type: str | None
     exception_message: str | None
+    # pytest's rendered traceback for this test (raw; sanitized before it is stored).
+    traceback: str | None = None
 
     def format(self) -> str:
         location = self.test_file
@@ -115,11 +124,15 @@ class TestFailureDiagnostic:
 
         lines = [f"FAILED {location}"]
 
+        # format() feeds the application log, so secrets/paths are masked here too.
         if self.source_line:
-            lines.append(f"  source: {self.source_line}")
+            lines.append(f"  source: {redact_source_line(self.source_line)}")
 
         if self.exception_type:
-            lines.append(f"  exception: {self.exception_type}: {self.exception_message or ''}")
+            lines.append(
+                f"  exception: {clean_exception_type(self.exception_type)}: "
+                f"{clean_exception_message(self.exception_message, sensitive_context=has_sensitive_context(self.source_line, self.traceback)) or ''}"
+            )
 
         return "\n".join(lines)
 
@@ -309,6 +322,7 @@ def parse_junit_report(junit_xml_path: Path) -> list[TestFailureDiagnostic]:
                 source_line=frame.source if frame else None,
                 exception_type=exc_type,
                 exception_message=exc_message,
+                traceback=traceback_text.strip() or None,
             )
         )
 

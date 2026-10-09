@@ -3471,3 +3471,53 @@ table { max-width: 100%; }
 }
 .home-danger-zone h4 { margin: 0 0 4px; }
 .home-danger-zone p { margin: 0; font-size: 0.875rem; opacity: 0.8; }
+
+/* Failure analysis panel (run results) */
+.home-analysis {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid color-mix(in srgb, var(--color-critical) 30%, transparent);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  min-width: 0;
+}
+.home-analysis h5 { margin: 0; color: var(--color-critical); font-size: 13px; }
+.home-analysis h6 { margin: 0 0 6px; font-size: 13px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.home-analysis p { margin: 0 0 6px; overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.home-analysis-head { display: grid; gap: 4px; }
+.home-analysis-head .home-analysis-title { margin: 0; color: var(--text-primary); font-size: 17px; text-transform: none; letter-spacing: 0; }
+.home-analysis-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.home-analysis-badge {
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.home-analysis-badge.is-high { border-color: var(--status-success); }
+.home-analysis-badge.is-medium { border-color: var(--status-running); }
+.home-analysis-badge.is-low { border-color: var(--color-critical); }
+.home-analysis-summary { font-size: 14px; }
+.home-analysis-meta, .home-analysis-note { color: var(--text-secondary); font-size: 12px; }
+.home-analysis-label { margin-top: 8px; font-size: 12px; font-weight: 700; color: var(--text-secondary); }
+.home-analysis-section { min-width: 0; }
+.home-analysis-evidence { display: grid; gap: 4px; margin: 0 0 8px; }
+.home-analysis-evidence > div { display: grid; grid-template-columns: minmax(120px, 190px) minmax(0, 1fr); gap: 10px; }
+.home-analysis-evidence dt { color: var(--text-secondary); font-size: 12px; }
+.home-analysis-evidence dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.home-analysis-evidence code { font-family: Consolas, "Courier New", monospace; font-size: 12px; }
+.home-analysis-timeline, .home-analysis-actions { display: grid; gap: 6px; margin: 0; padding-left: 20px; }
+.home-analysis-timeline li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; font-size: 13px; }
+.home-analysis-timeline li.is-failed { color: var(--color-critical-light); font-weight: 700; }
+.home-analysis-role { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-secondary); }
+.home-analysis-step { overflow-wrap: anywhere; }
+.home-analysis-step-status { font-size: 12px; font-weight: 700; }
+.home-analysis-step-error { flex-basis: 100%; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.home-analysis-actions li { font-size: 13px; }
+.home-analysis-tech summary { cursor: pointer; color: var(--text-accent); font-size: 13px; font-weight: 700; }
+.home-analysis-copy { margin: 8px 0; }
+.home-analysis-trace { max-height: 320px; margin-top: 4px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  .home-analysis-evidence > div { grid-template-columns: 1fr; gap: 0; }
+}

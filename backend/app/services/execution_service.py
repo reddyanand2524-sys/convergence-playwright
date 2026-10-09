@@ -36,6 +36,12 @@ from app.database import SessionLocal
 from app.models.project_file import ProjectFile
 from app.models.run import Run
 from app.services.pytest_diagnostics import parse_junit_report
+from app.services.failure_sanitizer import (
+    collect_known_secrets,
+    collect_typed_values,
+    sanitize_process_output,
+    sanitize_step,
+)
 from app.services.result_persistence_service import persist_run_results
 
 
@@ -241,6 +247,47 @@ def _write_conftest(tmp_path: Path, run_id: int) -> None:
     logger.info("Run %s: wrote execution-time conftest.py (Selenium compatibility layer)", run_id)
 
 
+def _collect_run_secrets(tmp_path: Path) -> tuple[str, ...]:
+    """Secrets for sanitizing this run's output: literals the uploaded scripts pass
+    to secret-named fields, plus every value the run typed (from steps.json, which
+    includes values that came from fixtures or data modules)."""
+    secrets = list(
+        collect_known_secrets(
+            path.read_text(encoding="utf-8", errors="ignore")
+            for path in tmp_path.glob("*.py")
+            if path.name != "conftest.py"
+        )
+    )
+    try:
+        events = json.loads((tmp_path / "steps.json").read_text(encoding="utf-8"))
+        secrets.extend(
+            collect_typed_values(
+                (e.get("action"), recorded)
+                for e in events
+                for recorded in (e.get("value"), e.get("runtime_value"))
+            )
+        )
+    except (OSError, ValueError, AttributeError):
+        pass
+    return tuple(dict.fromkeys(secrets))
+
+
+# Names (case-insensitive, substring) of environment variables that must never be
+# handed to uploaded test code: the backend's own credentials and secrets.
+_ENV_DENYLIST = ("DATABASE_URL", "JWT_", "SMTP_", "SECRET", "PASSWORD", "PASSWD", "TOKEN", "API_KEY", "ACCESS_KEY")
+
+
+def _subprocess_environment() -> dict[str, str]:
+    """The pytest subprocess environment: the backend's environment minus its own
+    credentials. Uploaded test code runs in this subprocess, so anything left in
+    here can be read (and printed) by a test."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(marker in key.upper() for marker in _ENV_DENYLIST)
+    }
+
+
 def _log_step_summary(run: Run, tmp_path: Path) -> None:
     """Logs the Selenium IDE step correlation captured by the compatibility
     layer (step number/action/target/value/status/error) for this run.
@@ -265,12 +312,19 @@ def _log_step_summary(run: Run, tmp_path: Path) -> None:
         run.id, len(steps), len(failed_steps),
     )
 
+    # The log must not carry typed secrets: sanitize exactly like the API/reports.
+    secrets = _collect_run_secrets(tmp_path)
+
     for step in failed_steps:
+        target, value, error = sanitize_step(
+            step.get("target"), step.get("value"), step.get("error"), secrets,
+            action=step.get("action"),
+        )
         logger.error(
             "Run %s: step %s (%s %s%s) FAILED: %s",
-            run.id, step.get("step"), step.get("action"), step.get("target"),
-            f" = {step.get('value')}" if step.get("value") else "",
-            step.get("error"),
+            run.id, step.get("step"), step.get("action"), target,
+            f" = {value}" if value else "",
+            error,
         )
 
 
@@ -300,7 +354,7 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
     # patches every Selenium browser constructor to redirect to it, so an
     # uploaded webdriver.Chrome() call actually opens whatever browser this
     # Run was created with.
-    env = os.environ.copy()
+    env = _subprocess_environment()
     env["SELENIUM_BROWSER"] = run.browser.lower()
     env["SELENIUM_COMPAT_RUN_DIR"] = str(tmp_path)
     env["SELENIUM_COMPAT_SCREENSHOT_DIR"] = str(tmp_path / "screenshots")
@@ -441,10 +495,18 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
             stderr = ""
 
         logger.info("Run %s: pytest exited with return code %s", run.id, returncode)
-        logger.info("Run %s: pytest stdout (tail):\n%s", run.id, (stdout or "")[-4000:])
+        # Process output holds tracebacks and assertion text: sanitize before logging.
+        log_secrets = _collect_run_secrets(tmp_path)
+        logger.info(
+            "Run %s: pytest stdout (tail):\n%s",
+            run.id, (sanitize_process_output(stdout, log_secrets) or "")[-4000:],
+        )
 
         if stderr:
-            logger.info("Run %s: pytest stderr (tail):\n%s", run.id, stderr[-4000:])
+            logger.info(
+                "Run %s: pytest stderr (tail):\n%s",
+                run.id, (sanitize_process_output(stderr, log_secrets) or "")[-4000:],
+            )
 
         # Phase 6A fix — final authoritative cancellation check.
         #

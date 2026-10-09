@@ -30,6 +30,18 @@ from app.models.run_result import RunResult
 from app.models.screenshot import Screenshot
 from app.models.step_result import StepResult
 from app.models.test_result import TestResult
+from app.services.failure_sanitizer import (
+    clean_exception_message,
+    clean_exception_type,
+    collect_known_secrets,
+    collect_typed_values,
+    has_sensitive_context,
+    mask_known_secrets,
+    redact_source_line,
+    sanitize_process_output,
+    sanitize_step,
+    sanitize_traceback,
+)
 from app.services.pytest_diagnostics import parse_junit_report
 
 logger = logging.getLogger(__name__)
@@ -54,6 +66,8 @@ def persist_run_results(
             select(ProjectFile).where(ProjectFile.project_id == run.project_id)
         ).all()
         files_by_name = {pf.file_name: pf for pf in project_files}
+        # Literals the scripts pass to secret-named fields: masked before storing.
+        known_secrets = collect_known_secrets(pf.file_content for pf in project_files)
 
         # ------------------------------------------------------------
         # 1. JUnit XML -> TestResult rows
@@ -101,6 +115,17 @@ def persist_run_results(
 
         events_by_nodeid = _read_steps_json(steps_json_path, run)
 
+        # Everything this run typed (including values that came from fixtures or
+        # data modules) is treated as secret: masked in step values, failure text,
+        # tracebacks and process output before anything is stored.
+        typed_values = collect_typed_values(
+            (event.get("action"), recorded)
+            for events in events_by_nodeid.values()
+            for event in events
+            for recorded in (event.get("value"), event.get("runtime_value"))
+        )
+        known_secrets = tuple(dict.fromkeys((*known_secrets, *typed_values)))
+
         for nodeid, events in events_by_nodeid.items():
             test_result = test_results_by_nodeid.get(nodeid)
 
@@ -124,15 +149,22 @@ def persist_run_results(
 
                 occurred_at = _epoch_to_datetime(event.get("timestamp"))
 
+                # Typed values are not stored (marker only) unless explicitly enabled;
+                # secret-named fields and known secrets are always masked.
+                step_target, step_value, step_error = sanitize_step(
+                    event.get("target"), event.get("value"), event.get("error"),
+                    known_secrets, action=event.get("action"),
+                )
+
                 step_result = StepResult(
                     test_result_id=test_result.id,
                     step_number=event.get("step"),
                     action=str(event.get("action") or "")[:100],
-                    target=_truncate(event.get("target"), 1000),
-                    value=_truncate(event.get("value"), 1000),
+                    target=_truncate(step_target, 1000),
+                    value=_truncate(step_value, 1000),
                     status=str(event.get("status") or "PASS")[:10],
                     duration_seconds=event.get("duration"),
-                    error=event.get("error") or None,
+                    error=step_error or None,
                     sequence_index=sequence_index,
                     occurred_at=occurred_at,
                 )
@@ -231,14 +263,25 @@ def persist_run_results(
                 )
                 continue
 
+            # New rows are stored already sanitized (secrets masked, paths reduced
+            # to basenames, driver stack removed), so typed values do not sit in the
+            # database or in the SQL log. Historical rows are sanitized on read.
+            failure_context = has_sensitive_context(diag.source_line, diag.traceback)
             failure = FailureDiagnostic(
                 test_result_id=test_result.id,
-                exception_type=_truncate(diag.exception_type, 255),
-                exception_message=diag.exception_message,
+                exception_type=_truncate(clean_exception_type(diag.exception_type, known_secrets), 255),
+                exception_message=clean_exception_message(
+                    diag.exception_message, limit=None,
+                    sensitive_context=failure_context, secrets=known_secrets,
+                ),
                 source_file=_truncate(diag.test_file, 255),
                 source_line_number=diag.source_line_number,
-                source_line=_truncate(diag.source_line, 1000),
-                raw_traceback=None,
+                source_line=_truncate(
+                    mask_known_secrets(redact_source_line(diag.source_line), known_secrets), 1000
+                ),
+                raw_traceback=sanitize_traceback(
+                    diag.traceback, sensitive_context=failure_context, secrets=known_secrets,
+                ),
             )
             db.add(failure)
 
@@ -257,8 +300,10 @@ def persist_run_results(
             passed_count=passed_count,
             failed_count=failed_count,
             skipped_count=skipped_count,
-            stdout=_truncate(stdout, _MAX_TEXT_CHARS),
-            stderr=_truncate(stderr, _MAX_TEXT_CHARS),
+            # Raw process output holds tracebacks and assertion text; store it
+            # sanitized (it is not returned by any endpoint or report today).
+            stdout=_truncate(sanitize_process_output(stdout, known_secrets), _MAX_TEXT_CHARS),
+            stderr=_truncate(sanitize_process_output(stderr, known_secrets), _MAX_TEXT_CHARS),
         )
         db.add(run_result)
 
