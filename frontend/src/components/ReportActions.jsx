@@ -83,6 +83,7 @@ export default function ReportActions({ projectId, run }) {
   }
 
   return (
+    <>
     <div className="home-reports" ref={rootRef}>
       <button
         className="home-secondary-button"
@@ -114,17 +115,20 @@ export default function ReportActions({ projectId, run }) {
           ))}
         </div>
       )}
-
-      {!available && <p className="home-reports-hint">{UNAVAILABLE}</p>}
-
-      {notice && (
-        <p
-          className={`home-notice is-${notice.kind} home-reports-notice`}
-          role={notice.kind === "error" ? "alert" : "status"}
-        >
-          {notice.text}
-        </p>
-      )}
     </div>
+
+    {/* Siblings of .home-reports (not children), so the Reports control stays one
+        button tall and lines up with its neighbours; each wraps to its own full row. */}
+    {!available && <p className="home-reports-hint">{UNAVAILABLE}</p>}
+
+    {notice && (
+      <p
+        className={`home-notice is-${notice.kind} home-reports-notice`}
+        role={notice.kind === "error" ? "alert" : "status"}
+      >
+        {notice.text}
+      </p>
+    )}
+    </>
   );
 }

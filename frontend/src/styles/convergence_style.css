@@ -2511,6 +2511,11 @@ button.home-file-edit {
   color: var(--text-secondary);
   font-size: 12px;
 }
+/* Rendered as direct children of .home-run-actions: own full-width row under the buttons. */
+.home-run-actions > .home-reports-notice {
+  flex: 1 1 100%;
+  margin: 0;
+}
 @media (max-width: 560px) {
   .home-reports-menu {
     left: auto;
@@ -3189,6 +3194,19 @@ table { max-width: 100%; }
 .cv-password { display: flex; align-items: center; padding: 0 6px 0 14px; }
 .cv-password input { flex: 1; min-width: 0; height: auto; padding: 0; border: 0; background: transparent; }
 .cv-password input:focus { border: 0; outline: none; }
+/* Chrome/Edge autofill paints its own light background on the <input> only (for the
+   password field that is the inner input, not the .cv-password wrapper), leaving a
+   partly highlighted field. Repaint it with the field's own background so typed and
+   autofilled values look identical. Scoped to the sign-in form; autofill stays enabled. */
+.cv-form input:-webkit-autofill,
+.cv-form input:-webkit-autofill:hover,
+.cv-form input:-webkit-autofill:focus,
+.cv-form input:-webkit-autofill:active {
+  -webkit-text-fill-color: var(--text-primary);
+  caret-color: var(--text-primary);
+  -webkit-box-shadow: 0 0 0 1000px var(--color-ink-2) inset;
+  box-shadow: 0 0 0 1000px var(--color-ink-2) inset;
+}
 .cv-password-toggle {
   height: 34px;
   padding: 0 10px;
