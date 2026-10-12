@@ -24,18 +24,88 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.failure_diagnostic import FailureDiagnostic
+from app.models.project import Project
 from app.models.project_file import ProjectFile
 from app.models.run import Run
 from app.models.run_result import RunResult
 from app.models.screenshot import Screenshot
 from app.models.step_result import StepResult
 from app.models.test_result import TestResult
+from app.services.execution_report import build_execution_report, report_to_json
 from app.services.pytest_diagnostics import parse_junit_report
 
 logger = logging.getLogger(__name__)
 
 _MAX_TEXT_CHARS = 200_000
 _STATUS_MAP_DEFAULT = "PASSED"
+
+
+_REPORT_COLUMN = {"available": None, "checked_at": 0.0, "alter_attempted": False}
+_RECHECK_SECONDS = 300  # re-inspect (never re-ALTER) this often while the column is missing
+
+_REPORT_COLUMN_DDL = "ALTER TABLE dbo.run_results ADD report_json NVARCHAR(MAX) NULL"  # SQL Server
+_REPORT_COLUMN_DDL_SQLITE = "ALTER TABLE run_results ADD report_json TEXT NULL"  # tests only
+
+
+def report_column_available() -> bool:
+    """True only if run_results.report_json exists.
+
+    * The column is looked up in the schema (never inferred from SQL errors).
+    * If it is missing, ONE attempt to add it is made per process, and only when the login
+      has ALTER permission on the table. Without that permission nothing is attempted and a
+      warning with the DDL for a DBA is logged once; every other feature keeps working
+      (reports are simply not stored, and report/json answers 404).
+    * While the column is missing the schema is re-inspected every few minutes so that a
+      DBA-added column is picked up without a restart.
+    * A failure to inspect the schema is logged and reported as "unavailable" but is not
+      cached and never triggers DDL."""
+
+    import time
+
+    from sqlalchemy import inspect, text
+
+    from app.database import engine
+
+    state = _REPORT_COLUMN
+    if state["available"] is True:
+        return True
+    if state["available"] is False and time.monotonic() - state["checked_at"] < _RECHECK_SECONDS:
+        return False
+
+    def has_column() -> bool:
+        return "report_json" in {c["name"] for c in inspect(engine).get_columns("run_results")}
+
+    try:
+        available = has_column()
+    except Exception:
+        logger.exception("Could not inspect run_results; JSON execution reports are unavailable for now")
+        return False
+
+    if not available and not state["alter_attempted"]:
+        state["alter_attempted"] = True
+        try:
+            with engine.begin() as connection:
+                if engine.dialect.name == "sqlite":
+                    allowed, ddl = True, _REPORT_COLUMN_DDL_SQLITE
+                else:
+                    allowed = connection.execute(
+                        text("SELECT HAS_PERMS_BY_NAME('dbo.run_results', 'OBJECT', 'ALTER')")
+                    ).scalar() == 1
+                    ddl = _REPORT_COLUMN_DDL
+                if allowed:
+                    connection.execute(text(ddl))
+            available = has_column()
+        except Exception:
+            logger.exception("Adding run_results.report_json failed")
+        if not available:
+            logger.warning(
+                "run_results.report_json is missing and this database login cannot add it; JSON execution "
+                "reports are disabled until a database administrator runs: %s", _REPORT_COLUMN_DDL,
+            )
+
+    state["available"] = available
+    state["checked_at"] = time.monotonic()
+    return available
 
 
 def persist_run_results(
@@ -48,12 +118,15 @@ def persist_run_results(
     junit_report_path: Path,
     steps_json_path: Path,
     screenshots_dir: Path,
+    steps_meta_path: Path | None = None,
 ) -> None:
     try:
         project_files = db.scalars(
             select(ProjectFile).where(ProjectFile.project_id == run.project_id)
         ).all()
         files_by_name = {pf.file_name: pf for pf in project_files}
+        project_row = db.get(Project, run.project_id)
+        project_name = project_row.name if project_row is not None else None
 
         # ------------------------------------------------------------
         # 1. JUnit XML -> TestResult rows
@@ -113,7 +186,7 @@ def persist_run_results(
                 continue
 
             for sequence_index, event in enumerate(events):
-                if event.get("action") == "TEST_FAILURE":
+                if event.get("action") in ("TEST_FAILURE", "TEST_SETUP_FAILURE"):
                     # This is the test_failure-hook marker event, not a real
                     # Selenium IDE step — it has no step number/target and
                     # exists only to carry a test-level failure screenshot.
@@ -262,6 +335,13 @@ def persist_run_results(
         )
         db.add(run_result)
 
+        if report_column_available():
+            db.flush()
+            store_report_json(
+                db, run.id,
+                _build_report_json(run, project_name, testcases, steps_json_path, steps_meta_path, screenshots_dir, exit_code, stderr),
+            )
+
         # ------------------------------------------------------------
         # 6. Commit
         # ------------------------------------------------------------
@@ -280,6 +360,78 @@ def persist_run_results(
         )
         db.rollback()
         raise
+
+
+def store_report_json(db: Session, run_id: int, report_json: str | None) -> None:
+    """Writes the report with plain SQL (the column is deliberately not part
+    of the ORM model, so databases without it keep working unchanged)."""
+    from sqlalchemy import text
+
+    if report_json is None:
+        return
+    db.execute(
+        text("UPDATE run_results SET report_json = :report WHERE run_id = :run_id"),
+        {"report": report_json, "run_id": run_id},
+    )
+
+
+def load_report_json(db: Session, run_id: int) -> str | None:
+    from sqlalchemy import text
+
+    if not report_column_available():
+        return None
+    return db.execute(
+        text("SELECT report_json FROM run_results WHERE run_id = :run_id"), {"run_id": run_id}
+    ).scalar()
+
+
+def _read_json(path: Path | None, default):
+    if path is None or not path.exists():
+        return default
+    try:
+        import json
+
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read %s (%s)", path.name, exc)
+        return default
+
+
+def _build_report_json(run, project_name, testcases, steps_json_path, steps_meta_path, screenshots_dir, exit_code, stderr) -> str | None:
+    """Builds and validates the JSON execution report from the same facts
+    being persisted. A failure here is logged loudly but never blocks
+    persisting the rest of the results (the report is then simply absent)."""
+
+    try:
+        events = _read_json(steps_json_path, [])
+        meta = _read_json(steps_meta_path, {})
+        available = (
+            {p.name for p in screenshots_dir.glob("*.png")} if screenshots_dir.exists() else set()
+        )
+        run_errors = []
+        if not testcases and exit_code not in (0, None):
+            tail = (stderr or "").strip()[-500:]
+            run_errors.append(
+                f"pytest exited with code {exit_code} and reported no tests (collection or startup error)."
+                + (f" Output: {tail}" if tail else "")
+            )
+        report = build_execution_report(
+            run_id=run.id,
+            test_results=testcases,
+            events=events if isinstance(events, list) else [],
+            meta=meta if isinstance(meta, dict) else {},
+            run_started_at=run.started_at,
+            browser=run.browser,
+            project_id=run.project_id,
+            project_name=project_name,
+            exit_code=exit_code,
+            available_screenshots=available,
+            run_level_errors=run_errors,
+        )
+        return report_to_json(report)
+    except Exception:
+        logger.exception("Run %s: could not build the JSON execution report", run.id)
+        return None
 
 
 def _parse_junit_testcases(junit_report_path: Path) -> list[dict]:

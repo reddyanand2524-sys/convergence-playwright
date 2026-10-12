@@ -5,6 +5,7 @@ import {
   REPORT_FORMATS,
   downloadExcelReport,
   downloadHtmlReport,
+  downloadJsonReport,
   downloadPdfReport,
 } from "../services/runsApi.js";
 import { describeError } from "../services/authedFetch.js";
@@ -13,6 +14,7 @@ const DOWNLOADERS = {
   html: downloadHtmlReport,
   excel: downloadExcelReport,
   pdf: downloadPdfReport,
+  json: downloadJsonReport,
 };
 
 const UNAVAILABLE = "Reports are available only for completed or failed runs.";
@@ -75,7 +77,15 @@ export default function ReportActions({ projectId, run }) {
       saveBlob(blob, filename);
       setNotice({ kind: "success", text: `${label} report downloaded: ${filename}` });
     } catch (err) {
-      setNotice({ kind: "error", text: describeError(err, "Project or Run not found.") });
+      // A 404 for the JSON report usually means "no report stored for this run" (or storage disabled):
+      // show the server's explanation instead of the generic "Project or Run not found".
+      const jsonMissing = format === "json" && err?.status === 404;
+      setNotice({
+        kind: "error",
+        text: jsonMissing
+          ? (typeof err.detail === "string" && err.detail) || "No JSON execution report is available for this run."
+          : describeError(err, "Project or Run not found."),
+      });
     } finally {
       inFlight.current[format] = false;
       setPending((prev) => ({ ...prev, [format]: false }));

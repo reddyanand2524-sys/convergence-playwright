@@ -7,6 +7,7 @@ import RunStatusBadge from "../../components/RunStatusBadge.jsx";
 import ReportActions from "../../components/ReportActions.jsx";
 import RunResultsSummary from "../../components/results/RunResultsSummary.jsx";
 import TestResultCard from "../../components/results/TestResultCard.jsx";
+import ExecutionReportPanel from "../../components/results/ExecutionReportPanel.jsx";
 import useRunPolling from "../../hooks/useRunPolling.js";
 import { getRunResults } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
@@ -168,6 +169,10 @@ function ResultsBody({ data, projectId, polling }) {
             <TestResultCard key={test.id} test={test} projectId={projectId} runId={run.id} />
           ))}
         </div>
+      )}
+
+      {(run.status === "COMPLETED" || run.status === "FAILED") && (
+        <ExecutionReportPanel key={run.id} projectId={projectId} runId={run.id} />
       )}
 
       <p className="home-results-note">

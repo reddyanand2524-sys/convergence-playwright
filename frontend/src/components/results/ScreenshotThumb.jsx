@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import LoadingState from "../brand/LoadingState.jsx";
 import { ImageOff, X } from "lucide-react";
 
-import { getScreenshotBlob } from "../../services/runsApi.js";
+import { getScreenshotArtifactBlob, getScreenshotBlob } from "../../services/runsApi.js";
 
 /*
  * Loads one screenshot through the authenticated API as a Blob and shows it
@@ -19,7 +19,14 @@ export default function ScreenshotThumb({ projectId, runId, screenshot }) {
     let objectUrl = "";
     setState({ status: "loading", src: "" });
 
-    getScreenshotBlob(projectId, runId, screenshot.id, controller.signal)
+    // Results API rows have a numeric id; JSON-report entries only carry the
+    // "screenshots/<file>" artifact path, resolved by file name.
+    const request =
+      screenshot.id != null
+        ? getScreenshotBlob(projectId, runId, screenshot.id, controller.signal)
+        : getScreenshotArtifactBlob(projectId, runId, screenshot.file_name, controller.signal);
+
+    request
       .then((blob) => {
         objectUrl = URL.createObjectURL(blob);
         setState({ status: "ready", src: objectUrl });
@@ -33,7 +40,7 @@ export default function ScreenshotThumb({ projectId, runId, screenshot }) {
       controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [projectId, runId, screenshot.id]);
+  }, [projectId, runId, screenshot.id, screenshot.file_name]);
 
   useEffect(() => {
     if (!open) return undefined;

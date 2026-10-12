@@ -470,10 +470,14 @@ def test_report_404_cross_user(
     from app.models.project import Project
     from app.models.user import User
 
+    import uuid
+
+    # Unique per test run: must not collide with rows already in a shared database.
+    unique = uuid.uuid4().hex[:12]
     other_user = User(
         full_name="Other User",
-        email="phase7-other-user@example.com",
-        mobile_number="9000000099",
+        email=f"phase7-other-user-{unique}@example.com",
+        mobile_number="8" + str(uuid.uuid4().int % 10**9).rjust(9, "0"),
         password_hash=hash_password("Password123!"),
         is_active=True,
     )

@@ -533,6 +533,7 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
                     stderr=stderr,
                     junit_report_path=junit_report_path,
                     steps_json_path=tmp_path / "steps.json",
+                    steps_meta_path=tmp_path / "steps_meta.json",
                     screenshots_dir=tmp_path / "screenshots",
                 )
             except Exception:

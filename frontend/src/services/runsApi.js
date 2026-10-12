@@ -133,6 +133,22 @@ export function getScreenshotBlob(projectId, runId, screenshotId, signal) {
   );
 }
 
+// GET /projects/{project_id}/runs/{run_id}/report/json
+// The structured JSON execution report. 404 = no report for this run (e.g. it
+// predates reporting); 409 = run not COMPLETED/FAILED.
+export function getExecutionReport(projectId, runId, signal) {
+  return authedFetch(`/projects/${projectId}/runs/${runId}/report/json`, { signal });
+}
+
+// GET /projects/{project_id}/runs/{run_id}/artifacts/screenshots/{file_name}
+// Resolves the "screenshots/<file_name>" paths used inside the JSON report.
+export function getScreenshotArtifactBlob(projectId, runId, fileName, signal) {
+  return authedFetch(
+    `/projects/${projectId}/runs/${runId}/artifacts/screenshots/${encodeURIComponent(fileName)}`,
+    { signal, responseType: "blob" }
+  );
+}
+
 // ---- Reports -------------------------------------------------------------
 // GET /projects/{project_id}/runs/{run_id}/report/{html|excel|pdf}
 // Only COMPLETED/FAILED runs have reports (409 otherwise). Fetched with the
@@ -141,6 +157,7 @@ export const REPORT_FORMATS = {
   html: { label: "HTML", ext: "html", mime: "text/html" },
   excel: { label: "Excel", ext: "xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" },
   pdf: { label: "PDF", ext: "pdf", mime: "application/pdf" },
+  json: { label: "JSON", ext: "json", mime: "application/json" },
 };
 
 async function downloadReport(projectId, runId, format) {
@@ -180,3 +197,4 @@ async function downloadReport(projectId, runId, format) {
 export const downloadHtmlReport = (projectId, runId) => downloadReport(projectId, runId, "html");
 export const downloadExcelReport = (projectId, runId) => downloadReport(projectId, runId, "excel");
 export const downloadPdfReport = (projectId, runId) => downloadReport(projectId, runId, "pdf");
+export const downloadJsonReport = (projectId, runId) => downloadReport(projectId, runId, "json");

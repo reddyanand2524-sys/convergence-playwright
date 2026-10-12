@@ -3473,3 +3473,18 @@ table { max-width: 100%; }
   justify-content: center;
   background: var(--color-ink-2);
 }
+
+/* JSON execution report panel */
+.home-json-view {
+  max-height: 420px;
+  margin-top: 12px;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

@@ -1,30 +1,28 @@
 
 
-import subprocess
+import os
 import threading
 import time
 import uuid
 
 import httpx
 import pytest
-import pyodbc
+from sqlalchemy import text
 
+from app.database import engine
 from tests.conftest import make_run
 
 
-LIVE_BASE_URL = "http://127.0.0.1:8000"
-
-CONN_STR = (
-    "mssql+pyodbc://@DESKTOP-2I11G5V/Convergence?driver=ODBC+Driver+18+for+SQL+Server"
-    "&trusted_connection=yes&TrustServerCertificate=yes"
-)
-RAW_CONN_STR = (
-    "DRIVER={ODBC Driver 18 for SQL Server};SERVER=DESKTOP-2I11G5V;DATABASE=Convergence;"
-    "Trusted_Connection=yes;TrustServerCertificate=yes"
-)
+# These tests drive a RUNNING backend over HTTP and then inspect the database that backend uses.
+# They create real users/projects/runs through that server, so they only run when explicitly
+# pointed at one (never at whatever happens to listen on a default port):
+#     LIVE_BASE_URL=http://127.0.0.1:8000 DATABASE_URL=<same database the server uses> pytest ...
+LIVE_BASE_URL = os.environ.get("LIVE_BASE_URL", "").rstrip("/")
 
 
 def _live_server_reachable() -> bool:
+    if not LIVE_BASE_URL:
+        return False
     try:
         resp = httpx.get(f"{LIVE_BASE_URL}/api/health", timeout=3)
         return resp.status_code == 200
@@ -34,20 +32,21 @@ def _live_server_reachable() -> bool:
 
 LIVE = pytest.mark.skipif(
     not _live_server_reachable(),
-    reason="live server not reachable at 127.0.0.1:8000",
+    reason="set LIVE_BASE_URL to a reachable backend (and DATABASE_URL to the database it uses) to run",
 )
 
 
 def _db_query(sql, params=()):
-    conn = pyodbc.connect(RAW_CONN_STR, timeout=5)
-    try:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        cols = [c[0] for c in cur.description] if cur.description else []
-        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
-        return rows
-    finally:
-        conn.close()
+    """Runs `sql` (with positional ? placeholders) on the configured database (DATABASE_URL)."""
+    named = {}
+    parts = sql.split("?")
+    statement = parts[0]
+    for index, value in enumerate(params):
+        named[f"p{index}"] = value
+        statement += f":p{index}" + parts[index + 1]
+    with engine.connect() as connection:
+        result = connection.execute(text(statement), named)
+        return [dict(row._mapping) for row in result.fetchall()]
 
 
 _PASS_SOURCE = '''

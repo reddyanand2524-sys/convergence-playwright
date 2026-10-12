@@ -20,6 +20,10 @@ from app.schemas.run_result import (
     StepResultSchema,
     TestResultSchema,
 )
+from pydantic import ValidationError
+
+from app.services.result_persistence_service import load_report_json, report_column_available
+from app.services.execution_report import is_safe_screenshot_name, report_from_json, report_to_json
 from app.services.report_data_service import build_report_data
 from app.services.report_excel_service import render_excel_report
 from app.services.report_html_service import render_html_report
@@ -310,4 +314,78 @@ def get_run_report_pdf(
         headers={
             "Content-Disposition": f'attachment; filename="Convergence_Run_{run_id}.pdf"'
         },
+    )
+
+
+@router.get("/{project_id}/runs/{run_id}/report/json")
+def get_run_report_json(
+    project_id: int,
+    run_id: int,
+    download: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """The structured JSON execution report (schema in
+    services/execution_report.py). Re-validated on every read so a corrupt
+    stored report is never returned as if it were valid."""
+
+    project = _get_owned_project(project_id, db, current_user)
+    run = _get_owned_run(project, run_id, db)
+    _require_reportable_run(run)
+
+    stored = load_report_json(db, run.id)
+
+    if not stored:
+        detail = "No JSON execution report is available for this run"
+        if not report_column_available():
+            detail += " (JSON report storage is not enabled on this database)"
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
+
+    try:
+        report = report_from_json(stored)
+    except ValidationError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The stored JSON execution report is invalid",
+        )
+
+    headers = {}
+    if download:
+        headers["Content-Disposition"] = f'attachment; filename="Convergence_Run_{run_id}.json"'
+
+    return Response(content=report_to_json(report), media_type="application/json", headers=headers)
+
+
+@router.get("/{project_id}/runs/{run_id}/artifacts/screenshots/{file_name}")
+def get_screenshot_artifact(
+    project_id: int,
+    run_id: int,
+    file_name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Resolves the ``screenshots/<file_name>`` paths used inside the JSON
+    report. Only a plain ``*.png`` name that belongs to THIS run's own
+    screenshots is served (looked up in the database, never the filesystem),
+    so no path traversal or cross-run access is possible."""
+
+    project = _get_owned_project(project_id, db, current_user)
+    run = _get_owned_run(project, run_id, db)
+
+    if not is_safe_screenshot_name(file_name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Screenshot not found")
+
+    row = db.execute(
+        select(Screenshot)
+        .join(TestResult, TestResult.id == Screenshot.test_result_id)
+        .where(TestResult.run_id == run.id, Screenshot.file_name == file_name)
+    ).first()
+
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Screenshot not found")
+
+    return Response(
+        content=row[0].content,
+        media_type=row[0].mime_type,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"},
     )
