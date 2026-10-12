@@ -64,6 +64,34 @@ test("an author's description is the title; the generic sentence moves to the su
   assert.equal(describeStep(one({ element_label: "Sign In" })).subtitle, "");
 });
 
+test("a failed browser setup reads as a setup problem, not a test step", () => {
+  const row = rowFor([base("step_failed", 0, { action: "setup", target: "", error_category: "ConvergenceCompatibilityError" })])[0];
+  assert.equal(genericTitle(row), "Browser setup failed");
+  assert.equal(failureSummary(row.errorCategory), "The browser setup in the script is not supported by Convergence");
+  assert.equal(describeStep(row).details[0].value, "browser initialization");
+});
+
+test("a failed element lookup before a mouse-over is one failed step with its number, locator and line", () => {
+  seq = 0;
+  const rows = rowFor([
+    base("step_passed", 2, { action: "click", step_number: 3 }),
+    base("step_failed", 3, {
+      action: "find", target: "", step_number: 4, locator_by: "link text", locator_value: "Shop Now →",
+      source_line: 31, error_category: "NoSuchElementException",
+    }),
+  ]);
+  assert.equal(rows.length, 2);
+  const failed = rows[1];
+  assert.deepEqual([failed.number, failed.status, failed.errorCategory], [4, "FAILED", "NoSuchElementException"]);
+  const described = describeStep(failed);
+  assert.equal(described.title, "Element not found (link \"Shop Now →\")");
+  const map = Object.fromEntries(described.details.map((d) => [d.label, d.value]));
+  assert.equal(map.Action, "find_element");
+  assert.equal(map.Line, "31");
+  assert.equal(map.Exception, "NoSuchElementException");
+  assert.equal(failureSummary(failed.errorCategory), "The element could not be found");
+});
+
 test("unknown actions get a neutral fallback", () => {
   assert.equal(genericTitle(one({}, "select", "")), "Select");
   assert.equal(genericTitle(one({}, "", "")), "Step");

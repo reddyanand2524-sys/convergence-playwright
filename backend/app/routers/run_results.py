@@ -16,6 +16,7 @@ from app.models.user import User
 from app.schemas.run_result import (
     FailureAnalysisSchema,
     FailureDiagnosticSchema,
+    RunIssueSchema,
     RunResultsResponse,
     RunResultsSummarySchema,
     ScreenshotRefSchema,
@@ -23,6 +24,7 @@ from app.schemas.run_result import (
     TestResultSchema,
 )
 from app.services import failure_analysis_service
+from app.services.run_issue_service import describe_run_issue
 from app.services.failure_sanitizer import (
     collect_known_secrets,
     collect_typed_values,
@@ -257,7 +259,22 @@ def get_run_results(
             duration_seconds=total_duration,
         )
 
-    return RunResultsResponse(run=run, summary=summary, tests=tests)
+    issue = None
+    if not tests and run.status in ("COMPLETED", "FAILED"):
+        # A finished run with no test cases: say why, from the stored exit code and output.
+        found = describe_run_issue(
+            run_status=run.status,
+            has_run_result=run_result is not None,
+            exit_code=run_result.exit_code if run_result is not None else None,
+            stdout=run_result.stdout if run_result is not None else None,
+            stderr=run_result.stderr if run_result is not None else None,
+            file_names=list(db.scalars(select(ProjectFile.file_name).where(ProjectFile.project_id == project.id))),
+            secrets=script_secrets,
+        )
+        if found is not None:
+            issue = RunIssueSchema(**found.__dict__)
+
+    return RunResultsResponse(run=run, summary=summary, tests=tests, issue=issue)
 
 
 @router.get(

@@ -506,7 +506,7 @@ def _clean_action(value, secrets: tuple[str, ...]) -> str:
 # Replay for runs without a buffer
 # --------------------------------------------------------------------------
 
-_ERROR_CLASS_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]{0,80})\(")
+_ERROR_CLASS_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]{0,80})(?:\(|:|$)")
 
 
 def replay_from_results(db, run, project_file_contents: Iterable[str] = ()) -> RunEventBuffer:

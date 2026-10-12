@@ -3642,3 +3642,10 @@ table { max-width: 100%; }
   .cv-timeline-details dt { flex-basis: 100%; }
   .cv-timeline-row .cv-timeline-error { padding-left: 0; }
 }
+
+/* Why a finished run has no results */
+.cv-run-issue h4 { margin: 0 0 6px; }
+.cv-run-issue p { margin: 0 0 6px; }
+.cv-run-issue ul { margin: 0 0 8px; padding-left: 20px; }
+.cv-run-issue-code { font-size: 0.8125rem; opacity: 0.85; }
+.cv-run-issue pre { max-height: 240px; overflow: auto; margin: 6px 0 0; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.3); font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }

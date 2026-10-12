@@ -118,6 +118,28 @@ export default function RunResultsPage() {
   );
 }
 
+// Why a finished run has no test results (from pytest's real exit code and output; never a result).
+function RunIssueNotice({ issue }) {
+  return (
+    <div className="home-notice is-error cv-run-issue" role="alert">
+      <h4>{issue.title}</h4>
+      <p>{issue.detail}</p>
+      {issue.hints?.length > 0 && (
+        <ul>
+          {issue.hints.map((hint) => <li key={hint}>{hint}</li>)}
+        </ul>
+      )}
+      {issue.exit_code != null && <p className="cv-run-issue-code">pytest exit code: {issue.exit_code}</p>}
+      {issue.output_tail && (
+        <details>
+          <summary>Output</summary>
+          <pre>{issue.output_tail}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
 function ResultsBody({ data, projectId, polling }) {
   const { run, summary, tests } = data;
   const duration =
@@ -157,9 +179,13 @@ function ResultsBody({ data, projectId, polling }) {
       {summary && <RunResultsSummary summary={summary} />}
 
       {Array.isArray(tests) && tests.length === 0 && (
-        <div className="home-empty-state">
-          <p>No test results were captured for this run.</p>
-        </div>
+        data.issue ? (
+          <RunIssueNotice issue={data.issue} />
+        ) : (
+          <div className="home-empty-state">
+            <p>No test results were captured for this run.</p>
+          </div>
+        )
       )}
 
       {Array.isArray(tests) && tests.length > 0 && (

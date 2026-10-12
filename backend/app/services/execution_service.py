@@ -43,6 +43,7 @@ from app.services.failure_sanitizer import (
     sanitize_step,
 )
 from app.services import run_event_service
+from app.services.test_file_selection import select_test_files
 from app.services.result_persistence_service import persist_run_results
 
 
@@ -374,6 +375,29 @@ def _log_failure_diagnostics(run: Run, junit_report_path: Path) -> None:
         logger.error("Run %s: %s", run.id, diagnostic.format())
 
 
+def _pytest_targets(run_id: int, tmp_path: Path) -> list[str]:
+    """What pytest is asked to collect. Normally the run directory (pytest finds
+    test_*.py / *_test.py itself). When an uploaded file defines tests but is named
+    otherwise ("tes(1).py", "login.py"), pytest's own discovery would skip it and exit
+    with code 5 without importing anything, so the test-defining files are passed
+    explicitly instead. Files are only read (parsed), never changed."""
+    try:
+        selected, by_content = select_test_files(tmp_path)
+    except Exception:
+        logger.exception("Run %s: could not inspect the uploaded files; using plain discovery", run_id)
+        return [str(tmp_path)]
+
+    if not by_content:
+        return [str(tmp_path)]
+
+    logger.info(
+        "Run %s: %d file(s) define tests but are not named test_*.py or *_test.py; collecting them "
+        "explicitly: %s",
+        run_id, len(by_content), ", ".join(p.name for p in by_content),
+    )
+    return [str(path) for path in selected]
+
+
 def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
     # Uploaded test files hardcode their own webdriver.Chrome()/.Firefox()/
     # .Edge() calls regardless of the Run's selected browser. The generated
@@ -401,7 +425,7 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
     junit_report_path = tmp_path / "_diagnostics_report.xml"
 
     command = [
-        sys.executable, "-m", "pytest", str(tmp_path),
+        sys.executable, "-m", "pytest", *_pytest_targets(run.id, tmp_path),
         "-q", "--tb=long", f"--junitxml={junit_report_path}",
     ]
 
@@ -618,7 +642,12 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
 
             _log_step_summary(run, tmp_path)
 
-            if run.status == "FAILED":
+            if returncode == 5:
+                logger.warning(
+                    "Run %s: pytest collected no tests (exit code 5): no uploaded file defines a "
+                    "test it can find. No test results will be recorded.", run.id,
+                )
+            elif run.status == "FAILED":
                 _log_failure_diagnostics(run, junit_report_path)
 
             # Phase 5: persist the full result tree (test results, step

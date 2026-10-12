@@ -73,6 +73,7 @@ CASES = [
     ("selenium.common.exceptions.WebDriverException", "Message: Internal Server Error returned by the page", rules.APPLICATION_ERROR, "medium"),
     ("requests.exceptions.HTTPError", "500 Server Error: for url: http://x", rules.API_ERROR, "high"),
     ("selenium.common.exceptions.SessionNotCreatedException", "session not created: Chrome instance exited", rules.BROWSER_CONFIGURATION_ERROR, "high"),
+    ("conftest.ConvergenceCompatibilityError", "The argument 'executable_path' was removed in Selenium 4.50.0", rules.BROWSER_CONFIGURATION_ERROR, "high"),
     ("selenium.common.exceptions.WebDriverException", "disconnected: not connected to DevTools", rules.WEBDRIVER_ERROR, "medium"),
     ("selenium.common.exceptions.WebDriverException", "something odd happened", rules.WEBDRIVER_ERROR, "medium"),
     ("KeyError", "'username'", rules.TEST_DATA_ERROR, "low"),

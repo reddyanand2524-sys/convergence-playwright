@@ -37,6 +37,7 @@ import ast
 import json
 import os
 import re
+import socket
 import sys
 import time
 import threading
@@ -45,8 +46,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import selenium
 from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.support.ui import WebDriverWait
@@ -115,16 +120,15 @@ def _load_step_comments(filename):
     return result
 
 
-def _source_step(action, target="", value=""):
-    frame = _test_source_frame()
-    if not frame:
-        return None
-
-    steps = _load_step_comments(frame.filename)
+def _step_for_line(filename, lineno, action):
+    """The Selenium IDE step ("# N | action | target | value" comment) that the source line
+    `lineno` of `filename` belongs to: the nearest preceding comment with this action, else
+    the nearest preceding comment. None when the file has none."""
+    steps = _load_step_comments(filename)
     if not steps:
         return None
 
-    before = [s for s in steps if s["line"] <= frame.lineno]
+    before = [s for s in steps if s["line"] <= lineno]
     if not before:
         return None
 
@@ -132,6 +136,13 @@ def _source_step(action, target="", value=""):
     if candidates:
         return candidates[-1]
     return before[-1]
+
+
+def _source_step(action, target="", value=""):
+    frame = _test_source_frame()
+    if not frame:
+        return None
+    return _step_for_line(frame.filename, frame.lineno, action)
 
 
 # ---------------------------------------------------------------------------
@@ -640,24 +651,40 @@ def _step_end(token, status, exc=None):
         pass
 
 
-def _emit_failed_step(action, exc, extra=None):
+def _current_test_line():
+    """Line of the test file that is executing right now (the failing call), or None."""
+    try:
+        frame = _test_frame()
+        line = frame.f_lineno if frame is not None else None
+        return line if isinstance(line, int) and 0 < line < 1_000_000 else None
+    except Exception:
+        return None
+
+
+def _emit_failed_step(action, exc, extra=None, step=None):
     """A failure that is only known once it has happened (element not found, a failed
     assertion): one step_failed event, no step_started and no duration. Skipped inside
-    another instrumented step, which reports its own outcome."""
+    another instrumented step, which reports its own outcome. `step` is the Selenium IDE
+    step the failing line belongs to (its number is shown; its value never is)."""
     try:
         if getattr(CUR, "step_depth", 0):
             return
         index = _next_step_index()
         nodeid = _node()
+        fields = dict(extra or {})
+        if "source_line" not in fields and action != "setup":
+            line = _current_test_line()
+            if line:
+                fields["source_line"] = line
         event = {
             "type": "step_failed",
             "nodeid": nodeid,
             "step_id": f"{nodeid}#{index}",
             "step_index": index,
-            "step_number": None,
+            "step_number": step["number"] if step else None,
             "action": action,
             "target": "",
-            **(extra or {}),
+            **fields,
             "status": "FAILED",
             "timestamp": _utc_now(),
             "error_category": type(exc).__name__,
@@ -668,6 +695,49 @@ def _emit_failed_step(action, exc, extra=None):
         _emit(event)
     except Exception:
         pass
+
+
+# A failure that happens inside the test body but is only an exception so far: the test
+# may still catch it (try/except NoSuchElementException ...). It is written to steps.json
+# - and so to the stored results - only if that same exception object is what ends the
+# test (see pytest_runtest_makereport). Until then it is remembered here.
+def _remember_failure(action, exc, step, locator, started):
+    try:
+        if getattr(CUR, "step_depth", 0):
+            return
+        CUR.pending_failure = {
+            "exc": exc, "action": action, "step": step, "locator": locator,
+            "duration": max(0.0, time.perf_counter() - started),
+        }
+    except Exception:
+        pass
+
+
+def _failed_step_target(pending):
+    """Target text of a recorded failed step: the Selenium IDE target when the line
+    belongs to an IDE step, else the safe locator, else nothing."""
+    step = pending.get("step")
+    if step:
+        return step.get("target", "")
+    locator = pending.get("locator")
+    if locator and locator[0] in _LOCATOR_BY and _safe_locator_value(locator[1]):
+        return f"{locator[0]}={locator[1]}"
+    return ""
+
+
+def _failure_text(exc):
+    """"ExceptionType: message" for the stored step (the backend sanitizes the message when
+    it is saved and shown: Selenium's stacktrace block, paths, known secrets)."""
+    return f"{type(exc).__name__}: {exc}"[:2000]
+
+
+def _record_failed_step(action, step, target, duration, drv, error):
+    """steps.json record of the action that failed, with a screenshot when one can be
+    taken. The IDE step keeps its number; its value (which can be typed text) is dropped."""
+    recorded = {**step, "action": action, "value": ""} if step else None
+    label = f"step_{step['number']}" if step else action
+    screenshot = shot(drv, label) if drv else ""
+    _record(action, target, "", duration, "FAIL", error, screenshot, recorded)
 
 
 def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a, k: "", before=None):
@@ -706,7 +776,7 @@ def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a,
 
 
 # ---------------------------------------------------------------------------
-# Browser constructor patching + implicit wait.
+# Browser constructor patching + implicit wait + legacy initialization.
 #
 # Selenium IDE files are commonly generated with webdriver.Chrome()
 # regardless of which browser the Run UI selected. Every Selenium browser
@@ -716,6 +786,22 @@ def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a,
 # implicit wait (the platform's existing readiness mechanism) is applied
 # right after construction, in the same place, rather than via a second
 # separate WebDriver.__init__ patch.
+#
+# Legacy initialization (Selenium 3 era exports, e.g.
+#   webdriver.Remote(command_executor='http://localhost:4444/wd/hub',
+#                    desired_capabilities=DesiredCapabilities.CHROME) )
+# is adapted when the call happens, not by rewriting the uploaded source: the
+# uploaded file, its stored copy and its line numbers are never touched.
+#   * desired_capabilities / capabilities become Options of the Run's browser.
+#   * chrome_options= / firefox_options= / edge_options= become options=.
+#   * webdriver.Remote honours the script's command_executor. Only the Selenium
+#     IDE default (localhost:4444) with nothing listening - i.e. no Grid in this
+#     environment - starts the Run's browser locally, with a visible notice.
+#   * Anything that cannot be adapted safely (executable_path, an unknown
+#     capability, conflicting values, ...) raises ConvergenceCompatibilityError:
+#     a setup error that names the problem, the script line and the original
+#     Selenium error. It is never reported as a test assertion failure.
+# A call that uses only Selenium 4 arguments is passed through unchanged.
 # ---------------------------------------------------------------------------
 _BROWSER_CLASSES = {"chrome": "Chrome", "edge": "Edge", "firefox": "Firefox"}
 _selected_browser = os.environ.get("SELENIUM_BROWSER", "chrome").lower().strip()
@@ -725,23 +811,337 @@ if _selected_browser not in _BROWSER_CLASSES:
 _selected_name = _BROWSER_CLASSES[_selected_browser]
 _original_ctors = {name: getattr(webdriver, name) for name in _BROWSER_CLASSES.values() if hasattr(webdriver, name)}
 _selected_original_ctor = _original_ctors.get(_selected_name)
+_original_remote = webdriver.Remote
+
+# Looked up at call time (so tests can substitute them without starting a browser).
+_CTORS = {"selected": _selected_original_ctor, "remote": _original_remote}
+_OPTIONS_CLASSES = {"chrome": ChromeOptions, "edge": EdgeOptions, "firefox": FirefoxOptions}
 
 
-def _make_browser_factory(name, original_ctor):
+class ConvergenceCompatibilityError(Exception):
+    """The script's browser initialization uses something Convergence cannot adapt.
+    A setup problem to fix in the script or the Run's browser, not a failed test."""
+
+
+def _compat_location():
+    """"file.py:LINE" of the script line that made the call (first frame that is
+    neither this module nor Selenium)."""
+    try:
+        here = os.path.normcase(os.path.abspath(__file__))
+        frame = sys._getframe(1)
+        while frame is not None:
+            name = os.path.normcase(os.path.abspath(frame.f_code.co_filename))
+            if name != here and f"{os.sep}selenium{os.sep}" not in name:
+                return f"{os.path.basename(name)}:{frame.f_lineno}"
+            frame = frame.f_back
+    except Exception:
+        pass
+    return ""
+
+
+def _setup_error(message, original=None):
+    """Raises ConvergenceCompatibilityError (and reports a failed "setup" step to the
+    live timeline). Values of capabilities are never put in the message: only names."""
+    where = _compat_location()
+    text = message + (f" (script line {where})" if where else "")
+    if original is not None:
+        text += f" Original error: {type(original).__name__}: {original}"
+    error = ConvergenceCompatibilityError(text)
+    _emit_failed_step("setup", error)
+    raise error from original
+
+
+_NOTICES = []
+
+
+def _compat_notice(text):
+    """A visible, non-fatal note about something that was adapted or not applied."""
+    if text not in _NOTICES:
+        _NOTICES.append(text)
+        print(f"[convergence] {text}", file=sys.stderr, flush=True)
+
+
+def _finish_driver(driver):
+    driver.implicitly_wait(IMPLICIT_WAIT_SECONDS)
+    CUR.driver = driver
+    return driver
+
+
+# -- capabilities -> Options ---------------------------------------------------
+_BROWSER_NAMES = {"chrome": "chrome", "microsoftedge": "edge", "msedge": "edge", "edge": "edge", "firefox": "firefox"}
+_W3C_CAPS = frozenset((
+    "acceptInsecureCerts", "pageLoadStrategy", "platformName", "browserVersion", "proxy", "setWindowRect",
+    "strictFileInteractability", "timeouts", "unhandledPromptBehavior", "webSocketUrl",
+))
+_CAP_ALIASES = {"acceptSslCerts": "acceptInsecureCerts", "version": "browserVersion", "platform": "platformName"}
+# JSON-wire capabilities that no longer mean anything: dropped, with a notice.
+_LEGACY_NOOP_CAPS = frozenset((
+    "javascriptEnabled", "takesScreenshot", "handlesAlerts", "cssSelectorsEnabled", "nativeEvents", "rotatable",
+    "locationContextEnabled", "databaseEnabled", "applicationCacheEnabled", "browserConnectionEnabled",
+    "webStorageEnabled", "takesHeapSnapshot", "hasTouchScreen", "networkConnectionEnabled",
+))
+_VENDOR_OPTION_CAPS = {"goog:chromeOptions": "chrome", "chromeOptions": "chrome", "ms:edgeOptions": "edge",
+                       "moz:firefoxOptions": "firefox"}
+_VENDOR_PREFIX_OWNER = {"goog": "chrome", "ms": "edge", "moz": "firefox"}
+_REMOVED_ARGUMENTS = {
+    "executable_path": "the path of a driver on the developer's machine; Convergence supplies the driver",
+    "service_args": "pass a selenium Service object (service=) instead",
+    "service_log_path": "pass a selenium Service object (service=) instead",
+    "firefox_profile": "set preferences on FirefoxOptions instead",
+    "firefox_binary": "set binary_location on FirefoxOptions instead",
+    "browser_profile": "set preferences on FirefoxOptions instead",
+    "proxy": "set the proxy on Options instead",
+    "port": "pass a selenium Service object (service=) instead",
+}
+
+
+def _apply_vendor_options(options, owner, key, value, problems, notes):
+    if owner != _selected_browser:
+        notes.append(f"'{key}' is for {owner} but this Run uses {_selected_browser}; it was not applied")
+        return
+    if not isinstance(value, dict):
+        problems.append(f"'{key}' must be a dict")
+        return
+    for name, item in value.items():
+        if name == "args" and isinstance(item, (list, tuple)):
+            for arg in item:
+                if isinstance(arg, str) and arg not in options.arguments:
+                    options.add_argument(arg)
+        elif name == "prefs" and isinstance(item, dict):
+            if _selected_browser == "firefox":
+                current = dict(getattr(options, "preferences", {}) or {})
+                for pref, pref_value in item.items():
+                    if pref in current and current[pref] != pref_value:
+                        problems.append(f"preference '{pref}' is set twice with different values")
+                    else:
+                        options.set_preference(pref, pref_value)
+            else:
+                current = dict(getattr(options, "experimental_options", {}).get("prefs", {}) or {})
+                for pref, pref_value in item.items():
+                    if pref in current and current[pref] != pref_value:
+                        problems.append(f"preference '{pref}' is set twice with different values")
+                merged = {**item, **current}
+                options.add_experimental_option("prefs", merged)
+        elif name in ("binary", "extensions", "localState", "profile"):
+            notes.append(f"'{key}.{name}' refers to files on the developer's machine; it was not applied")
+        elif _selected_browser != "firefox":
+            options.add_experimental_option(name, item)
+        else:
+            notes.append(f"'{key}.{name}' is not supported for firefox; it was not applied")
+
+
+def _legacy_caps_to_options(caps, options=None):
+    """Options of the Run's browser built from legacy capabilities. Duplicates and
+    conflicts (with each other or with `options`) are errors, never silent overrides."""
+    if not isinstance(caps, dict):
+        _setup_error(f"desired_capabilities must be a dict of capabilities, not {type(caps).__name__}.")
+    selected = _selected_browser
+    if options is None:
+        options = _OPTIONS_CLASSES[selected]()
+    elif not isinstance(options, _OPTIONS_CLASSES[selected]):
+        _setup_error(
+            f"The script passes both capabilities and options of a different browser than this Run's "
+            f"browser ({selected}); Convergence cannot combine them."
+        )
+    existing = dict(getattr(options, "capabilities", {}) or {})
+    problems, notes, unknown = [], [], []
+    w3c, vendor_caps, vendor_options = {}, {}, []
+
+    for raw, value in caps.items():
+        if raw == "browserName":
+            name = _BROWSER_NAMES.get(str(value).lower().strip())
+            if name is None:
+                problems.append(f"browserName '{value}' is not supported (Convergence runs chrome, edge or firefox)")
+            elif name != selected:
+                _compat_notice(
+                    f"The script asks for {name}, but this Run's browser is {selected}; {selected} is used. "
+                    f"(Change the project's browser to run the script in {name}.)"
+                )
+            continue
+        key = _CAP_ALIASES.get(raw, raw)
+        if raw in _LEGACY_NOOP_CAPS or (raw == "marionette" and value is not False):
+            notes.append(f"legacy capability '{raw}' has no effect in Selenium 4 and was ignored")
+        elif raw == "marionette":
+            problems.append("marionette=False (the legacy Firefox driver) is not supported")
+        elif key in _W3C_CAPS:
+            if raw == "platform" and str(value).upper() in ("ANY", ""):
+                continue
+            if key in w3c and w3c[key][1] != value:
+                problems.append(f"'{raw}' and '{w3c[key][0]}' both set {key} with different values")
+            else:
+                w3c[key] = (raw, value)
+        elif raw in _VENDOR_OPTION_CAPS:
+            vendor_options.append((raw, value))
+        elif ":" in raw:
+            owner = _VENDOR_PREFIX_OWNER.get(raw.split(":", 1)[0])
+            if owner and owner != selected:
+                notes.append(f"'{raw}' is for {owner} but this Run uses {selected}; it was not applied")
+            else:
+                vendor_caps[raw] = value
+        else:
+            unknown.append(raw)
+
+    if unknown:
+        problems.append("unsupported capability name(s): " + ", ".join(sorted(map(str, unknown))))
+    for key, (raw, value) in w3c.items():
+        if key in existing and existing[key] != value:
+            problems.append(f"'{raw}' conflicts with the value already set in options")
+        else:
+            options.set_capability(key, value)
+    for key, value in vendor_caps.items():
+        if key in existing and existing[key] != value:
+            problems.append(f"'{key}' conflicts with the value already set in options")
+        else:
+            options.set_capability(key, value)
+    for key, value in vendor_options:
+        _apply_vendor_options(options, _VENDOR_OPTION_CAPS[key], key, value, problems, notes)
+
+    if problems:
+        _setup_error("The script's capabilities cannot be converted to Selenium 4 options: " + "; ".join(problems) + ".")
+    for note in notes:
+        _compat_notice(note)
+    return options
+
+
+def _reject_removed_arguments(kwargs):
+    for name in kwargs:
+        if name in _REMOVED_ARGUMENTS:
+            _setup_error(
+                f"The argument '{name}' was removed in Selenium {selenium.__version__} and cannot be adapted "
+                f"automatically: {_REMOVED_ARGUMENTS[name]}."
+            )
+
+
+def _wrap_signature_error(error):
+    """A TypeError from a changed constructor signature becomes an actionable setup error;
+    any other exception (a genuine start-up failure) is left alone."""
+    text = str(error)
+    if "unexpected keyword argument" in text or "positional argument" in text:
+        _setup_error(
+            f"The browser initialization does not match Selenium {selenium.__version__}'s API and Convergence "
+            f"cannot adapt it automatically. Use Selenium 4 Options/Service arguments.",
+            error,
+        )
+
+
+def _prepare_local_call(args, kwargs):
+    kwargs = dict(kwargs)
+    if args and isinstance(args[0], (str, os.PathLike)):
+        _setup_error(
+            "A driver path was passed as the first argument (Selenium 3 executable_path), which Selenium 4 "
+            "no longer accepts; Convergence supplies the driver."
+        )
+    legacy_options = [name for name in ("chrome_options", "firefox_options", "edge_options") if name in kwargs]
+    legacy_caps = [name for name in ("desired_capabilities", "capabilities") if name in kwargs]
+    if not legacy_options and not legacy_caps:
+        _reject_removed_arguments(kwargs)
+        return args, kwargs  # Selenium 4 arguments: unchanged
+
+    if len(legacy_caps) > 1:
+        _setup_error("Both desired_capabilities and capabilities are given; use one.")
+    if len(legacy_options) > 1 or (legacy_options and "options" in kwargs):
+        _setup_error(f"The browser options are given more than once ({', '.join(legacy_options + (['options'] if 'options' in kwargs else []))}).")
+    if legacy_options:
+        kwargs["options"] = kwargs.pop(legacy_options[0])
+    caps = kwargs.pop(legacy_caps[0]) if legacy_caps else None
+    _reject_removed_arguments(kwargs)
+    if caps is not None:
+        kwargs["options"] = _legacy_caps_to_options(caps, kwargs.get("options"))
+    return args, kwargs
+
+
+def _start_local(args, kwargs):
+    try:
+        driver = _CTORS["selected"](*args, **kwargs)
+    except TypeError as error:
+        _wrap_signature_error(error)
+        raise
+    return _finish_driver(driver)
+
+
+def _make_browser_factory(name):
     def create(*args, **kwargs):
-        driver = original_ctor(*args, **kwargs)
-        driver.implicitly_wait(IMPLICIT_WAIT_SECONDS)
-        CUR.driver = driver
-        return driver
+        args, kwargs = _prepare_local_call(args, kwargs)
+        return _start_local(args, kwargs)
 
     create.__name__ = name
     create.__qualname__ = name
     return create
 
 
+# -- webdriver.Remote ------------------------------------------------------------
+_IDE_DEFAULT_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _ide_default_endpoint(url):
+    """(host, port) when `url` is the Selenium IDE / Grid default on this machine
+    (localhost:4444); otherwise None. Any other endpoint is used exactly as given."""
+    try:
+        parts = urlsplit(url)
+        if parts.hostname in _IDE_DEFAULT_HOSTS and parts.port == 4444:
+            return parts.hostname, parts.port
+    except Exception:
+        pass
+    return None
+
+
+def _listening(host, port, timeout=0.5):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _make_remote_factory():
+    def create_remote(*args, **kwargs):
+        kwargs = dict(kwargs)
+        positional = list(args)
+        executor = positional.pop(0) if positional else kwargs.pop("command_executor", "http://127.0.0.1:4444")
+        if positional and isinstance(positional[0], dict):  # Selenium 3: (executor, desired_capabilities, ...)
+            kwargs["desired_capabilities"] = positional.pop(0)
+        if positional:
+            _setup_error(
+                "webdriver.Remote was called with positional arguments after the capabilities (Selenium 3 "
+                "browser_profile/proxy/...), which Selenium 4 no longer accepts. Use keyword arguments and Options."
+            )
+
+        legacy_caps = [name for name in ("desired_capabilities", "capabilities") if name in kwargs]
+        if len(legacy_caps) > 1:
+            _setup_error("Both desired_capabilities and capabilities are given; use one.")
+        caps = kwargs.pop(legacy_caps[0]) if legacy_caps else None
+        _reject_removed_arguments(kwargs)
+
+        options = kwargs.pop("options", None)
+        if caps is not None:
+            options = _legacy_caps_to_options(caps, options)
+        elif options is None:
+            options = _OPTIONS_CLASSES[_selected_browser]()
+
+        endpoint = _ide_default_endpoint(executor) if isinstance(executor, str) else None
+        if endpoint is not None and not _listening(*endpoint):
+            _compat_notice(
+                f"No Selenium server answers at {executor}; Convergence runs this Run's browser "
+                f"({_selected_browser}) inside the backend, as it does for webdriver.{_selected_name}()."
+            )
+            return _start_local((), {"options": options})
+
+        try:
+            driver = _CTORS["remote"](command_executor=executor, options=options, **kwargs)
+        except TypeError as error:
+            _wrap_signature_error(error)
+            raise
+        return _finish_driver(driver)
+
+    create_remote.__name__ = "Remote"
+    create_remote.__qualname__ = "Remote"
+    return create_remote
+
+
 if _selected_original_ctor is not None:
     for _ctor_name in _original_ctors:
-        setattr(webdriver, _ctor_name, _make_browser_factory(_selected_name, _selected_original_ctor))
+        setattr(webdriver, _ctor_name, _make_browser_factory(_selected_name))
+    webdriver.Remote = _make_remote_factory()
 
 
 # ---------------------------------------------------------------------------
@@ -1003,6 +1403,7 @@ WebElement.click = _resilient_click
 # can re-resolve it if the DOM replaces the node.
 # ---------------------------------------------------------------------------
 def _resilient_find_element(self, by="id", value=None):
+    started = time.perf_counter()
     deadline = time.monotonic() + FIND_TIMEOUT
 
     while time.monotonic() < deadline:
@@ -1032,7 +1433,9 @@ def _resilient_find_element(self, by="id", value=None):
     except Exception as exc:
         # Element-not-found is only known now: report it as one failed step (nothing is
         # reported while the retries above are still looking).
-        _emit_failed_step("find", exc, _locator_fields(by, value))
+        step = None if getattr(CUR, "step_depth", 0) else _source_step("find")
+        _emit_failed_step("find", exc, _locator_fields(by, value), step=step)
+        _remember_failure("find", exc, step, (by, value), started)
         raise
 
 
@@ -1199,11 +1602,16 @@ def _wrap_wait(name):
         return
 
     def fn(self, method, *a, **k):
-        token = _step_begin("wait", "", None, None, _wait_meta(self, method, name))
+        meta = _wait_meta(self, method, name)
+        token = _step_begin("wait", "", None, None, meta)
         try:
             result = old(self, method, *a, **k)
         except Exception as exc:
             _step_end(token, "FAIL", exc)
+            if token is not None and not token.get("nested"):
+                locator = (meta.get("locator_by"), meta.get("locator_value"))
+                _remember_failure("wait", exc, _source_step("wait"), locator if all(locator) else None,
+                                  token.get("t0", time.perf_counter()))
             raise
         _step_end(token, "PASS")
         return result
@@ -1227,6 +1635,7 @@ def pytest_runtest_setup(item):
     CUR.typed_values = []
     CUR.step_seq = 0  # live-event step numbering restarts for every test
     CUR.step_depth = 0
+    CUR.pending_failure = None
 
 
 def pytest_runtest_logstart(nodeid, location):
@@ -1262,11 +1671,21 @@ def pytest_runtest_makereport(item, call):
             if isinstance(v, WebDriver):
                 drv = v
                 break
+    pending = getattr(CUR, "pending_failure", None)
+    CUR.pending_failure = None
+    if pending is not None and call.excinfo.value is pending["exc"]:
+        # The action that actually ended the test (e.g. the element lookup before a mouse-over)
+        # becomes a failed step in the stored results, so they agree with the failure analysis.
+        _record_failed_step(
+            pending["action"], pending["step"], _failed_step_target(pending),
+            pending["duration"], drv, _failure_text(pending["exc"]),
+        )
     sc = shot(drv, "test_failure") if drv else ""
     if issubclass(call.excinfo.type, AssertionError):
         # A failed assert is only known once it has failed. Only the line number is
         # reported, never the expression (it can contain secrets).
         extra = {}
+        step = None
         try:
             # The last traceback entry inside the test's own file (never a library or
             # helper module, whose line numbers would mean nothing here).
@@ -1275,10 +1694,14 @@ def pytest_runtest_makereport(item, call):
                     line = entry.lineno + 1
                     if 0 < line < 1_000_000:
                         extra = {"source_line": line}
+                        # The test's frame is gone by now, so the IDE step comes from the line.
+                        step = _step_for_line(str(entry.path), line, "assert")
                     break
         except Exception:
             extra = {}
-        _emit_failed_step("assert", call.excinfo.value, extra)
+        _emit_failed_step("assert", call.excinfo.value, extra, step=step)
+        # Stored too (class name only: the message or expression can contain secrets).
+        _record_failed_step("assert", step, "", 0, drv, "AssertionError()")
     import traceback as _traceback
     _record(
         "TEST_FAILURE",

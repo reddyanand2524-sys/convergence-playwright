@@ -10,14 +10,14 @@
 const KIND = {
   open: "open", navigate: "open", get: "open", refresh: "refresh", back: "back", forward: "forward",
   setwindowsize: "resize", click: "click", type: "type", sendkeys: "type", clear: "clear",
-  actionchains: "actions", wait: "wait", assert: "assert", find: "find",
+  actionchains: "actions", wait: "wait", assert: "assert", find: "find", setup: "setup",
 };
 
 // The Selenium call behind each kind, for the technical details.
 const METHOD = {
   open: "get", refresh: "refresh", back: "back", forward: "forward", resize: "set_window_size",
   click: "click", type: "send_keys", clear: "clear", actions: "ActionChains.perform",
-  wait: "WebDriverWait.until", assert: "assert", find: "find_element",
+  wait: "WebDriverWait.until", assert: "assert", find: "find_element", setup: "browser initialization",
 };
 
 const ROLE_WORD = {
@@ -54,6 +54,7 @@ const FAILURE_SUMMARY = {
   InvalidSelectorException: "The locator is not valid",
   AssertionError: "The assertion did not hold",
   WebDriverException: "The browser reported an error",
+  ConvergenceCompatibilityError: "The browser setup in the script is not supported by Convergence",
 };
 
 export function kindOf(action) {
@@ -123,6 +124,7 @@ export function genericTitle(row) {
     case "assert":
       return row.sourceLine ? `Assertion failed (line ${row.sourceLine})` : "Assertion failed";
     case "find": return withLocator("Element not found", row);
+    case "setup": return "Browser setup failed";
     default: {
       const name = String(row.action || "").trim();
       return name ? name[0].toUpperCase() + name.slice(1) : "Step";

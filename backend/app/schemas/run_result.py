@@ -130,10 +130,22 @@ class TestResultSchema(BaseModel):
         from_attributes = True
 
 
+class RunIssueSchema(BaseModel):
+    """Why a finished run has no test results (derived from pytest's real exit code and
+    output; never a test result)."""
+    code: str
+    title: str
+    detail: str
+    hints: list[str] = []
+    exit_code: int | None = None
+    output_tail: str | None = None
+
+
 class RunResultsResponse(BaseModel):
     run: RunResponse
     summary: RunResultsSummarySchema | None
     tests: list[TestResultSchema] | None
+    issue: RunIssueSchema | None = None
 
     class Config:
         from_attributes = True

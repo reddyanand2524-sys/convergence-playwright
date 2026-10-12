@@ -69,6 +69,8 @@ TYPE_RULES: dict[str, str] = {
     "InvalidArgumentException": NAVIGATION_FAILURE,
     "SessionNotCreatedException": BROWSER_CONFIGURATION_ERROR,
     "NoSuchDriverException": BROWSER_CONFIGURATION_ERROR,
+    # Raised by the runner when a script's browser initialization cannot be adapted.
+    "ConvergenceCompatibilityError": BROWSER_CONFIGURATION_ERROR,
     "InvalidSessionIdException": WEBDRIVER_ERROR,
     "NoSuchWindowException": WEBDRIVER_ERROR,
     "JavascriptException": APPLICATION_ERROR,
@@ -254,6 +256,8 @@ RECOMMENDED_ACTIONS: dict[str, tuple[str, ...]] = {
         "Check that the selected browser (Chrome, Edge or Firefox) is installed in the execution environment.",
         "Check that the browser and its driver versions are compatible.",
         "Review the platform's browser start-up logs for the cause of the exit.",
+        "If the message mentions a Convergence compatibility problem, update the script's browser "
+        "initialization as the message describes (Selenium 4 Options instead of desired_capabilities).",
     ),
     WEBDRIVER_ERROR: (
         "Check whether the browser crashed or was closed during the test (resource limits, a script closing the window).",

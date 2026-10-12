@@ -126,6 +126,16 @@ def test_runner_and_backend_agree_on_safe_pages(tmp_path):
     assert result == [svc.safe_page(u) for u in SAFE_PAGE_CASES]
 
 
+@pytest.mark.parametrize("stored,category", [
+    ("RuntimeError('boom')", "RuntimeError"),
+    ("NoSuchElementException: Message: no such element: Unable to locate element", "NoSuchElementException"),
+    ("AssertionError()", "AssertionError"),
+    ("TimeoutException", "TimeoutException"),
+])
+def test_replay_reads_the_exception_class_from_every_stored_error_shape(stored, category):
+    assert svc._ERROR_CLASS_RE.match(stored).group(1) == category
+
+
 def test_replay_of_a_finished_run_gives_readable_facts_without_inventing_any(client, db_session, test_project, auth_headers):
     run = make_run(db_session, test_project, status="FAILED")
     test = TestResult(run_id=run.id, nodeid="t.py::test_a", file_name="t.py", class_name=None, method_name="test_a",
