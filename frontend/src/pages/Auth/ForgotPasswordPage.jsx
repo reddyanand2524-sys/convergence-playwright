@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { motion } from "motion/react";
 import { KeyRound, Mail } from "lucide-react";
 
@@ -119,6 +120,9 @@ function ForgotPasswordPage() {
               </p>
             )}
           </form>
+          <Link to="/login" className="forgot-password-back">
+            ← Back to Login
+          </Link>
         </div>
       </motion.div>
     </div>

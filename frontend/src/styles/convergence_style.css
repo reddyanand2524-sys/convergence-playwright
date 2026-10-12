@@ -611,6 +611,21 @@ code, kbd, samp, pre,
     transform 0.2s ease,
     box-shadow 0.2s ease;
 }
+.forgot-password-back {
+  display: block;
+  margin-top: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.forgot-password-back:hover,
+.forgot-password-back:focus-visible {
+  color: var(--color-design-green);
+  text-decoration: underline;
+}
+
 .forgot-password-form .auth-button:hover {
   background: var(--surface-primary);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.44);
