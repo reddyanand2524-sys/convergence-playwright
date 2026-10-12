@@ -10,7 +10,9 @@ import RetryRunControl from "../../components/RetryRunControl.jsx";
 import ReportActions from "../../components/ReportActions.jsx";
 import LiveBrowserViewer from "../../components/LiveBrowserViewer.jsx";
 import StartRunControl from "../../components/StartRunControl.jsx";
+import StepTimeline from "../../components/StepTimeline.jsx";
 import useRunPolling from "../../hooks/useRunPolling.js";
+import useRunEvents from "../../hooks/useRunEvents.js";
 import { getRun } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 import { formatDateTime, formatDuration } from "../../utils/format.js";
@@ -73,6 +75,9 @@ export default function RunDetailsPage() {
     { activeStatuses: POLL_WHILE }
   );
 
+  // Live step events for the run on screen; independent of the poll above and of the viewer.
+  const events = useRunEvents(project.id, runId, view.status === "ready" ? run.status : null);
+
   return (
     <div className="home-runs">
       <Link className="home-back-link" to={`/projects/${project.id}/run`}>
@@ -125,9 +130,20 @@ export default function RunDetailsPage() {
             <div><dt>Cancel requested</dt><dd>{run.cancel_requested ? "Yes" : "No"}</dd></div>
           </dl>
 
-          {run.status === "RUNNING" && (
-            <LoadingState type="converge" label="Run in progress — results appear when it completes" className="cv-run-loader" />
-          )}
+          {/* One slot, in the position the old loader had, so LiveBrowserViewer below keeps its place in the tree. */}
+          {run.status === "RUNNING" || events.engaged ? (
+            events.connection === "error" && events.timeline.rows.length === 0 ? (
+              <LoadingState type="converge" label="Run in progress — results appear when it completes" className="cv-run-loader" />
+            ) : (
+              <StepTimeline
+                timeline={events.timeline}
+                connection={events.connection}
+                error={events.error}
+                runStatus={run.status}
+                resultsHref={run.status === "FAILED" ? `/projects/${project.id}/runs/${run.id}/results` : undefined}
+              />
+            )
+          ) : null}
 
           <LiveBrowserViewer run={run} />
 

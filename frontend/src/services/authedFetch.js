@@ -145,6 +145,52 @@ export async function authedFetch(path, options = {}) {
   return data;
 }
 
+/**
+ * Authenticated streaming GET (Server-Sent Events). Same bearer token and error
+ * conventions as authedFetch, but the successful Response is returned unread so the
+ * caller can consume response.body incrementally. The token is only ever sent in
+ * the Authorization header, never in the URL.
+ */
+export async function authedStream(path, { signal, headers: extraHeaders = {} } = {}) {
+  const headers = { Accept: "text/event-stream", ...extraHeaders };
+  const token = getAccessToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let response;
+
+  try {
+    response = await fetch(`${baseUrl()}${path}`, { method: "GET", headers, signal });
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    throw new ApiError(
+      "Cannot reach the backend. Check that the server is running and your network connection.",
+      0
+    );
+  }
+
+  if (!response.ok) {
+    let data = null;
+    try {
+      data = JSON.parse(await response.text());
+    } catch {
+      data = null;
+    }
+
+    if (response.status === 401) {
+      clearSession();
+      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+    }
+
+    throw new ApiError(
+      detailToMessage(data?.detail, `Request failed (HTTP ${response.status}).`),
+      response.status,
+      data?.detail
+    );
+  }
+
+  return response;
+}
+
 /** User-facing text for an error from authedFetch. */
 export function describeError(err, notFoundMessage = "Not found.") {
   if (err?.status === 0) return err.message;

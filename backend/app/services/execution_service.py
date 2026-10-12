@@ -42,6 +42,7 @@ from app.services.failure_sanitizer import (
     sanitize_process_output,
     sanitize_step,
 )
+from app.services import run_event_service
 from app.services.result_persistence_service import persist_run_results
 
 
@@ -128,6 +129,7 @@ def execute_run(run_id: int) -> None:
     exception, so it can't take the server down or leave the Run stuck."""
 
     db = SessionLocal()
+    run_event_service.open_run(run_id)
 
     try:
         run = db.scalar(select(Run).where(Run.id == run_id))
@@ -168,7 +170,32 @@ def execute_run(run_id: int) -> None:
             )
 
     finally:
+        _publish_terminal_event(db, run_id)
         db.close()
+
+
+def _publish_terminal_event(db, run_id: int) -> None:
+    """Publishes the run's single terminal event from its FINAL database status, so
+    it reflects the result logic (COMPLETED / FAILED / CANCELLED) and not merely
+    that the subprocess exited. Never raises."""
+    try:
+        status = db.scalar(select(Run.status).where(Run.id == run_id))
+    except Exception:
+        logger.exception("Run %s: could not read final status for the event stream", run_id)
+        status = None
+    try:
+        run_event_service.finish_run(run_id, status)
+    except Exception:
+        logger.exception("Run %s: could not publish terminal event", run_id)
+
+
+def _poll_events(tailer, final: bool = False) -> None:
+    if tailer is None:
+        return
+    try:
+        tailer.drain() if final else tailer.poll()
+    except Exception:
+        logger.exception("Run %s: event polling failed", tailer.run_id)
 
 
 def _run_with_temp_directory(db, run: Run, project_files: list[ProjectFile]) -> None:
@@ -400,6 +427,7 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
     logger.info("Run %s: launching pytest subprocess: %s", run.id, " ".join(command))
 
     proc: subprocess.Popen | None = None
+    tailer = None
     cancelled = False
     timed_out = False
 
@@ -443,6 +471,17 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
             with _REGISTRY_LOCK:
                 _PROCESS_REGISTRY[run.id] = proc
 
+            # Live events: tail this run's own events.jsonl from the same loop that
+            # already watches the subprocess. A failure here never affects the run.
+            try:
+                tailer = run_event_service.RunEventTailer(
+                    run.id, tmp_path / "events.jsonl", lambda: _collect_run_secrets(tmp_path)
+                )
+                run_event_service.publish_run_started(run.id)
+            except Exception:
+                logger.exception("Run %s: live events unavailable", run.id)
+                tailer = None
+
             # Manual poll loop (instead of a single blocking proc.wait(timeout=...))
             # so this thread can notice a cancellation signal (either the DB
             # cancel_requested flag, checked every poll interval, or a direct
@@ -457,6 +496,7 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
 
             while True:
                 returncode = proc.poll()
+                _poll_events(tailer)
                 if returncode is not None:
                     break
 
@@ -483,6 +523,7 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
             # we read them back below.
             proc.wait()
             returncode = proc.returncode
+            _poll_events(tailer, final=True)  # everything the process wrote before it ended
 
         try:
             stdout = stdout_path.read_text(encoding="utf-8", errors="replace")

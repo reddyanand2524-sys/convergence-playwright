@@ -1,20 +1,24 @@
 from datetime import date, datetime, timedelta
 from typing import Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import get_current_user
-from app.database import get_db
+from app.core.security import settings
+from app.database import SessionLocal, get_db
 from app.models.project import Project
+from app.models.project_file import ProjectFile
 from app.models.run import Run
 from app.models.run_result import RunResult
 from app.models.screenshot import Screenshot
 from app.models.test_result import TestResult
 from app.models.user import User
 from app.schemas.run import RunHistoryItem, RunHistoryResponse, RunResponse
-from app.services import execution_service
+from app.services import execution_service, run_event_service
 
 
 MAX_PAGE_SIZE = 100
@@ -292,6 +296,59 @@ def start_run(
     background_tasks.add_task(execution_service.execute_run, run.id)
 
     return run
+
+
+def _current_run_status(run_id: int) -> str | None:
+    """Fresh, short-lived read of the run's status (the request's own session is
+    closed once the response starts streaming)."""
+    with SessionLocal() as session:
+        return session.scalar(select(Run.status).where(Run.id == run_id))
+
+
+@router.get("/{project_id}/runs/{run_id}/events")
+def stream_run_events(
+    project_id: int,
+    run_id: int,
+    request: Request,
+    after: Optional[int] = Query(default=None, ge=0),
+    last_event_id: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Server-Sent Events for one run: live step events, replayable from `after`
+    (or the Last-Event-ID header; the bearer token is never put in a URL)."""
+    project = _get_owned_project(project_id, db, current_user)
+    run = _get_owned_run(project, run_id, db)
+
+    cursor = after
+    if cursor is None:
+        cursor = int(last_event_id) if last_event_id and last_event_id.strip().isdigit() else 0
+
+    buffer = run_event_service.get_buffer(run.id)
+    if buffer is None:
+        if run.status in ("QUEUED", "RUNNING"):
+            buffer = run_event_service.open_run(run.id)  # execution attaches to the same buffer
+        else:
+            buffer = run_event_service.replay_from_results(
+                db,
+                run,
+                db.scalars(select(ProjectFile.file_content).where(ProjectFile.project_id == project.id)),
+            )
+
+    async def probe() -> str | None:
+        return await run_in_threadpool(_current_run_status, run.id)
+
+    return StreamingResponse(
+        run_event_service.sse_stream(
+            buffer,
+            cursor,
+            request.is_disconnected,
+            status_probe=probe,
+            max_seconds=settings.test_execution_timeout_seconds + 120,
+        ),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
 
 
 _CANCELLABLE_STATUSES = ("QUEUED", "RUNNING")
