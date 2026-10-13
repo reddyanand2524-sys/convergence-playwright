@@ -44,7 +44,11 @@ from app.services.failure_sanitizer import (
 )
 from app.services import run_event_service
 from app.services.test_file_selection import select_test_files
-from app.services.result_persistence_service import persist_run_results
+from app.services.result_persistence_service import (
+    persist_run_results,
+    read_private_typed_values,
+    record_save_failure,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -297,6 +301,8 @@ def _collect_run_secrets(tmp_path: Path) -> tuple[str, ...]:
         )
     except (OSError, ValueError, AttributeError):
         pass
+    # typed values of sensitive fields, which the runner keeps out of steps.json
+    secrets.extend(collect_typed_values(("type", value) for value in read_private_typed_values(tmp_path)))
     return tuple(dict.fromkeys(secrets))
 
 
@@ -396,6 +402,37 @@ def _pytest_targets(run_id: int, tmp_path: Path) -> list[str]:
         run_id, len(by_content), ", ".join(p.name for p in by_content),
     )
     return [str(path) for path in selected]
+
+
+def _persist_results(db, run: Run, tmp_path: Path, junit_report_path: Path, *, returncode, stdout, stderr,
+                     interrupted: str | None = None) -> bool:
+    """Saves the run's results while the temporary directory still exists. True when saved.
+
+    A failure is never silent: it is logged with its stage and exception class (no values), and
+    a results row noting "saving failed" is stored, so the API and reports can tell this apart
+    from a run that simply recorded nothing."""
+    started = time.monotonic()
+    logger.info("Run %s: stage=persist start exit_code=%s interrupted=%s", run.id, returncode, bool(interrupted))
+    try:
+        persist_run_results(
+            db,
+            run,
+            exit_code=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            junit_report_path=junit_report_path,
+            steps_json_path=tmp_path / "steps.json",
+            steps_meta_path=tmp_path / "steps_meta.json",
+            screenshots_dir=tmp_path / "screenshots",
+            events_jsonl_path=tmp_path / "events.jsonl",
+            interrupted=interrupted,
+        )
+        return True
+    except Exception as exc:
+        logger.exception("Run %s: result persistence failed (%s) after %.2fs", run.id, type(exc).__name__,
+                         time.monotonic() - started)
+        record_save_failure(db, run, exit_code=returncode, error_type=type(exc).__name__)
+        return False
 
 
 def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
@@ -636,6 +673,13 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
                 run.id, settings.test_execution_timeout_seconds,
             )
             run.status = "FAILED"
+            # pytest was killed, so it never wrote its JUnit report - but the runner records
+            # tests, steps and screenshots as it goes. Keep everything that exists and say the
+            # results are partial; do not discard a run's evidence because it ran out of time.
+            _persist_results(
+                db, run, tmp_path, junit_report_path, returncode=returncode, stdout=stdout, stderr=stderr,
+                interrupted=f"run timed out after {settings.test_execution_timeout_seconds}s",
+            )
 
         else:
             run.status = "COMPLETED" if returncode == 0 else "FAILED"
@@ -656,22 +700,9 @@ def _execute_pytest(db, run: Run, tmp_path: Path) -> None:
             # persistence failure must never leave the Run looking COMPLETED
             # with nothing persisted — force FAILED in that case even if
             # pytest's own exit code was 0.
-            try:
-                persist_run_results(
-                    db,
-                    run,
-                    exit_code=returncode,
-                    stdout=stdout,
-                    stderr=stderr,
-                    junit_report_path=junit_report_path,
-                    steps_json_path=tmp_path / "steps.json",
-                    screenshots_dir=tmp_path / "screenshots",
-                )
-            except Exception:
-                logger.exception(
-                    "Run %s: result persistence failed — forcing status FAILED",
-                    run.id,
-                )
+            if not _persist_results(
+                db, run, tmp_path, junit_report_path, returncode=returncode, stdout=stdout, stderr=stderr,
+            ):
                 run.status = "FAILED"
 
     except Exception:

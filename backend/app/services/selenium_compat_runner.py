@@ -39,8 +39,10 @@ import os
 import re
 import socket
 import sys
+import textwrap
 import time
 import threading
+import types
 import inspect
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,6 +72,11 @@ IMPLICIT_WAIT_SECONDS = float(os.environ.get("SELENIUM_IMPLICIT_WAIT_SECONDS", "
 FIND_TIMEOUT = float(os.environ.get("SELENIUM_FIND_TIMEOUT", "12"))
 STALE_CLICK_TIMEOUT = float(os.environ.get("SELENIUM_STALE_CLICK_TIMEOUT", "10"))
 FIND_POLL = 0.2
+
+# Continue-after-error: a failed step (action or assertion) is recorded and
+# the test body keeps executing the remaining steps. "0" restores the old
+# stop-at-first-failure behavior.
+CONTINUE_ON_ERROR = os.environ.get("SELENIUM_COMPAT_CONTINUE_ON_ERROR", "1").strip() != "0"
 
 EVENTS = []
 LOCK = threading.Lock()
@@ -120,10 +127,10 @@ def _load_step_comments(filename):
     return result
 
 
-def _step_for_line(filename, lineno, action):
+def _step_for_line(filename, lineno, action=None):
     """The Selenium IDE step ("# N | action | target | value" comment) that the source line
-    `lineno` of `filename` belongs to: the nearest preceding comment with this action, else
-    the nearest preceding comment. None when the file has none."""
+    `lineno` of `filename` belongs to: the nearest preceding comment with this action (when an
+    action is given), else the nearest preceding comment. None when the file has none."""
     steps = _load_step_comments(filename)
     if not steps:
         return None
@@ -132,9 +139,10 @@ def _step_for_line(filename, lineno, action):
     if not before:
         return None
 
-    candidates = [s for s in before if s["action"].lower() == action.lower()]
-    if candidates:
-        return candidates[-1]
+    if action:
+        candidates = [s for s in before if s["action"].lower() == action.lower()]
+        if candidates:
+            return candidates[-1]
     return before[-1]
 
 
@@ -241,29 +249,131 @@ def shot(driver, label):
             _restore_typed(driver)
 
 
-def _record(action, target="", value="", duration=0, status="PASS", error="", screenshot="", step=None):
+_SENSITIVE_RE = re.compile(r"pass(word|wd)?|pwd|secret|token|api[-_]?key|otp|cvv", re.I)
+REDACTED = "***REDACTED***"
+_ERROR_TYPE_RE = re.compile(r"^\s*([A-Za-z_][\w.]*)\(")
+
+
+def _page_info():
+    drv = getattr(CUR, "driver", None)
+    url = title = None
+    if drv is not None:
+        try:
+            url = drv.current_url
+        except Exception:
+            pass
+        try:
+            title = drv.title
+        except Exception:
+            pass
+    return url, title
+
+
+# Typed values of SENSITIVE fields (a password input, or a credential-looking name or locator).
+# They are kept out of steps.json - which can end up in reports - and written to a private file
+# in the run's own temp directory instead, so the backend can still mask them wherever they
+# might surface (a failure message, a URL, process output) without them being in any record.
+_PRIVATE_TYPED = []
+
+
+def _keep_private(value):
+    """Remembers a sensitive typed value and writes the private file (owner-only permissions;
+    nothing is ever logged). Never raises: a failure here must not fail the test."""
+    with LOCK:
+        if value in _PRIVATE_TYPED:
+            return
+        _PRIVATE_TYPED.append(value)
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            descriptor = os.open(RUN_DIR / "typed_values.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(_PRIVATE_TYPED))
+        except Exception:
+            pass
+
+
+def _sensitive_by_name(*texts):
+    """True when a target / locator name says the field is a credential. Uses the incoming
+    branch's list and ours (pin, ssn, card number, verification code, ...)."""
+    return any(
+        text and (_SENSITIVE_RE.search(str(text)) or _SENSITIVE_NAME_RE.search(str(text))) for text in texts
+    )
+
+
+def _scrub_private(text):
+    """The free text of a record (an error message, a URL, a page title) with every withheld
+    typed value replaced: a test's own exception can echo the password it just typed."""
+    if isinstance(text, str) and _PRIVATE_TYPED:
+        for secret in _PRIVATE_TYPED:
+            text = text.replace(secret, "***")
+    return text
+
+
+def _element_is_password(element):
+    try:
+        return (element.get_attribute("type") or "").lower() == "password"
+    except Exception:
+        return False
+
+
+def _record(action, target="", value="", duration=0, status="PASS", error="", screenshot="", step=None,
+            locator=None, sensitive=False, skip_reason="", synthetic=False):
+    """status: PASS | FAIL | SKIP. SKIP means the step was defined but could
+    not be executed (``skip_reason`` says why); duration is then 0 and the
+    step is flagged attempted=False."""
+
     if status == "PASS" and not screenshot and SCREENSHOT_MODE == "all":
         drv = getattr(CUR, "driver", None)
         if drv is not None:
             label = f"step_{step['number']}" if step else action
             screenshot = shot(drv, label)
 
+    completed = time.time()
+    event_target = step["target"] if step else str(target)
+    event_value = step["value"] if step else str(value)
+    withhold = False
+    if sensitive or _sensitive_by_name(event_target, locator[1] if locator else None):
+        if action in ("type", "sendKeys", "send_keys", "clear") or sensitive:
+            event_value = REDACTED if event_value else event_value
+            withhold = True
+
+    # The value actually typed at run time. "value" above prefers the Selenium IDE comment's
+    # text when one matches, so a value that came from a fixture or data module would otherwise
+    # never be recorded. It exists only so the execution service can mask it everywhere; it is
+    # never persisted or shown. For a sensitive field it is not put in steps.json at all.
+    runtime_value = str(value) if (action == "type" and value) else ""
+    if withhold and runtime_value:
+        _keep_private(runtime_value)
+        runtime_value = ""
+
+    url, title = _page_info() if status != "SKIP" else (None, None)
+    url, title, error, skip_reason = (_scrub_private(v) for v in (url, title, error, skip_reason))
+    error_type = None
+    if error:
+        match = _ERROR_TYPE_RE.match(error)
+        error_type = match.group(1) if match else None
+
     event = {
         "nodeid": _node(),
         "step": step["number"] if step else None,
         "action": step["action"] if step else action,
-        "target": step["target"] if step else str(target),
-        "value": step["value"] if step else str(value),
-        # The value actually typed at run time. "value" above prefers the Selenium IDE
-        # comment's text when one matches, so a value that came from a fixture or data
-        # module would otherwise never be recorded. This key exists only so the
-        # execution service can mask it everywhere; it is never persisted or shown.
-        "runtime_value": str(value) if (action == "type" and value) else "",
+        "target": event_target,
+        "value": event_value,
+        "runtime_value": runtime_value,
         "status": status,
         "duration": round(duration, 4),
         "error": error,
         "screenshot": screenshot,
-        "timestamp": time.time(),
+        "timestamp": completed,
+        "started_at": completed - duration,
+        "url": url,
+        "title": title,
+        "locator_type": locator[0] if locator else None,
+        "locator_value": str(locator[1]) if locator else None,
+        "attempted": status != "SKIP",
+        "skip_reason": skip_reason or None,
+        "error_type": error_type,
+        "synthetic": synthetic,
     }
 
     with LOCK:
@@ -758,16 +868,23 @@ def _wrap(cls, name, action, target_fn=lambda s, a, k: "", value_fn=lambda s, a,
         if action == "setWindowSize" and len(a) >= 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in a[:2]):
             extra = {"window_size": f"{a[0]}x{a[1]}"}
         token = _step_begin(action, target, step, self if isinstance(self, WebElement) else None, extra)
+        # A password field (its type, or what the step metadata already found out about it) is
+        # decided before anything is typed; its value is then redacted in the recorded step.
+        sensitive = name == "send_keys" and (
+            bool(token and token.get("meta", {}).get("sensitive")) or _element_is_password(self)
+        )
         try:
             result = old(self, *a, **k)
             _step_end(token, "PASS")
-            _record(action, target, value, time.perf_counter() - st, "PASS", step=step)
+            _record(action, target, value, time.perf_counter() - st, "PASS", step=step,
+                    locator=getattr(self, "_selenium_compat_locator", None), sensitive=sensitive)
             return result
         except Exception as e:
             _step_end(token, "FAIL", e)
             drv = self if hasattr(self, "save_screenshot") else getattr(self, "parent", None)
             sc = shot(drv, f"step_{step['number']}" if step else action)
-            _record(action, target, value, time.perf_counter() - st, "FAIL", repr(e), sc, step)
+            _record(action, target, value, time.perf_counter() - st, "FAIL", repr(e), sc, step,
+                    locator=getattr(self, "_selenium_compat_locator", None), sensitive=sensitive)
             raise
 
     fn._selenium_compat_wrapped = True
@@ -1382,13 +1499,15 @@ def _resilient_click(self):
             target = getattr(clicked, "tag_name", target)
         except Exception:
             pass
-        _record("click", target, duration=time.perf_counter() - st, status="PASS", step=step)
+        _record("click", target, duration=time.perf_counter() - st, status="PASS", step=step,
+                locator=getattr(self, "_selenium_compat_locator", None))
         return None
     except Exception as e:
         _step_end(token, "FAIL", e)
         drv = getattr(self, "_parent", None)
         sc = shot(drv, f"step_{step['number']}" if step else "click")
-        _record("click", target, duration=time.perf_counter() - st, status="FAIL", error=repr(e), screenshot=sc, step=step)
+        _record("click", target, duration=time.perf_counter() - st, status="FAIL", error=repr(e), screenshot=sc, step=step,
+                locator=getattr(self, "_selenium_compat_locator", None))
         raise
 
 
@@ -1626,9 +1745,345 @@ _wrap_wait("until_not")
 
 
 # ---------------------------------------------------------------------------
-# pytest hooks — recognized automatically because this module's source is
+# Continue-after-error step guard.
+#
+# Selenium IDE exports put every step's statements at the top level of the
+# test method, so one failing statement (a missing element, a failed
+# ``assert``) would normally abort the rest of the test. Before a test body
+# runs, its source is parsed and every top-level statement is wrapped as
+#
+#     if __cc_begin__(n):
+#         with __cc_guard__(n):
+#             <original statement>
+#
+# The transformed function is compiled against the uploaded file's own
+# filename and line numbers (tracebacks and step correlation are unchanged)
+# and only replaces the in-memory test object -- the uploaded file on disk is
+# never modified, and assertions are never disabled: a failed assertion is
+# caught at its statement boundary, recorded as FAIL, and the test is still
+# reported as failed at the end (the first swallowed exception is re-raised).
+#
+# Dependency handling: a statement whose names (e.g. a variable assigned by a
+# failed statement) depend on a failed statement is recorded as SKIP with a
+# reason instead of being run. If the browser itself becomes unusable every
+# later driver-dependent statement is skipped. Independent statements keep
+# running.
+# ---------------------------------------------------------------------------
+_DRIVER_ROOTS = {"self.driver": "driver", "driver": "driver"}
+_BROWSER_DEAD_MARKERS = (
+    "invalid session id", "invalidsessionid", "no such window", "nosuchwindow",
+    "disconnected", "not reachable", "maxretryerror", "max retries exceeded",
+    "connection refused", "already closed", "session deleted",
+    "target window already closed", "cannot connect to chrome",
+)
+_UNWRAPPED = (
+    ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom,
+    ast.Global, ast.Nonlocal, ast.Pass, ast.Return, ast.Break, ast.Continue,
+)
+STEPS_META = {}
+_STEP_INFOS = {}
+
+
+def _chain(node):
+    """Dotted name for ``a.b.c`` rooted at a plain Name, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _loads_and_stores(stmt):
+    loads, stores = set(), set()
+
+    def add_target(target):
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for elt in target.elts:
+                add_target(elt)
+            return
+        node = target
+        while isinstance(node, ast.Subscript):
+            node = node.value
+        chain = _chain(node)
+        if chain:
+            stores.add(chain)
+
+    if isinstance(stmt, ast.Assign):
+        for t in stmt.targets:
+            add_target(t)
+    elif isinstance(stmt, (ast.AugAssign, ast.AnnAssign)):
+        add_target(stmt.target)
+
+    for node in ast.walk(stmt):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            chain = _chain(node)
+            if chain:
+                loads.add(chain)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            loads.add(node.id)
+    return loads, stores
+
+
+def _depends_on(loads, poisoned):
+    for name in loads:
+        for bad in poisoned:
+            if name == bad or name.startswith(bad + "."):
+                return bad
+    return None
+
+
+class _StepInfo:
+    def __init__(self, stmt, filename):
+        self.lineno = stmt.lineno
+        self.filename = filename
+        self.loads, self.stores = _loads_and_stores(stmt)
+        self.is_assert = isinstance(stmt, ast.Assert)
+
+
+def _begin(index):
+    """Returns True if the statement should run; otherwise records it as
+    SKIP (with the reason) and returns False."""
+    info = _STEP_INFOS[index]
+    poisoned = getattr(CUR, "poisoned", None)
+    if poisoned is None:
+        return True
+
+    reason = None
+    bad = _depends_on(info.loads, poisoned)
+    if bad:
+        reason = f"Depends on '{bad}', which is unavailable because {poisoned[bad]} failed"
+        origin = poisoned[bad]
+    elif getattr(CUR, "browser_dead", None) and _depends_on(info.loads, _DRIVER_ROOTS):
+        reason = f"The browser became unusable after {CUR.browser_dead} failed"
+        origin = CUR.browser_dead
+    else:
+        return True
+
+    _record("python", status="SKIP", step=_step_for_line(info.filename, info.lineno), skip_reason=reason)
+    for name in info.stores:
+        poisoned[name] = origin
+    return False
+
+
+def _format_error(exc):
+    # A failed assert's text is the expression with the values it compared, which can be
+    # secrets: only the class is stored. Other exceptions keep their message (sanitized when
+    # the results are saved and shown).
+    if isinstance(exc, AssertionError):
+        return "AssertionError()"
+    return f"{type(exc).__name__}({str(exc)!r})"
+
+
+class _Guard:
+    def __init__(self, index):
+        self.info = _STEP_INFOS[index]
+
+    def __enter__(self):
+        with LOCK:
+            self.start_count = len(EVENTS)
+        self.started = time.perf_counter()
+        return self
+
+    def _record_unobserved_pass(self):
+        """A statement mapped to a Selenium IDE step that completed without
+        the compatibility layer observing any Selenium call (e.g. a plain
+        Python/JS-store step) still executed; record that truthfully so the
+        step is not mistaken for one that never ran."""
+        step = _step_for_line(self.info.filename, self.info.lineno)
+        if step is None:
+            return
+        with LOCK:
+            observed = any(ev.get("nodeid") == _node() for ev in EVENTS[self.start_count:])
+        if not observed:
+            _record(step["action"], duration=time.perf_counter() - self.started, status="PASS", step=step, synthetic=True)
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self._record_unobserved_pass()
+            return False
+        # KeyboardInterrupt / SystemExit / pytest.skip / pytest.exit propagate.
+        if not isinstance(exc, Exception) and type(exc).__name__ != "Failed":
+            return False
+
+        info = self.info
+        step = _step_for_line(info.filename, info.lineno)
+        with LOCK:
+            already = any(
+                ev.get("nodeid") == _node() and ev.get("status") == "FAIL"
+                for ev in EVENTS[self.start_count:]
+            )
+        if not already:
+            drv = getattr(CUR, "driver", None)
+            pending = getattr(CUR, "pending_failure", None)
+            if pending is not None and exc is pending["exc"]:
+                # An element lookup or explicit wait ended this statement: keep its own action,
+                # locator and message rather than a generic "python" step (see _remember_failure).
+                CUR.pending_failure = None
+                _record_failed_step(
+                    pending["action"], pending["step"] or step, _failed_step_target(pending),
+                    pending["duration"], drv, _failure_text(exc),
+                )
+            else:
+                sc = shot(drv, f"step_{step['number']}" if step else "step_failure") if drv else ""
+                # A failed assertion's expected text (the IDE step's value) is not stored with it.
+                recorded = {**step, "value": ""} if (step and info.is_assert) else step
+                _record(
+                    "assert" if info.is_assert else "python",
+                    duration=time.perf_counter() - self.started,
+                    status="FAIL",
+                    error=_format_error(exc),
+                    screenshot=sc,
+                    step=recorded,
+                )
+        if info.is_assert and isinstance(exc, AssertionError):
+            # The live timeline reports a failed assertion too (line only, never the expression).
+            _emit_failed_step("assert", exc, {"source_line": info.lineno}, step=step)
+
+        label = f"step {step['number']}" if step else f"the statement at line {info.lineno}"
+        poisoned = getattr(CUR, "poisoned", None)
+        if poisoned is not None:
+            for name in info.stores:
+                poisoned[name] = label
+        text = f"{type(exc).__name__} {exc}".lower()
+        if any(marker in text for marker in _BROWSER_DEAD_MARKERS):
+            CUR.browser_dead = label
+
+        failures = getattr(CUR, "failures", None)
+        if failures is None:
+            return False
+        failures.append(exc)
+        return True
+
+
+class _Transformer(ast.NodeTransformer):
+    def __init__(self, filename):
+        self.filename = filename
+
+    def visit_FunctionDef(self, node):
+        new_body = []
+        for position, stmt in enumerate(node.body):
+            is_doc = (
+                position == 0
+                and isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Constant)
+            )
+            if is_doc or isinstance(stmt, _UNWRAPPED):
+                new_body.append(stmt)
+                continue
+            index = len(_STEP_INFOS)
+            _STEP_INFOS[index] = _StepInfo(stmt, self.filename)
+            guard_call = ast.Call(func=ast.Name("__cc_guard__", ast.Load()), args=[ast.Constant(index)], keywords=[])
+            guarded = ast.With(items=[ast.withitem(context_expr=guard_call, optional_vars=None)], body=[stmt])
+            begin_call = ast.Call(func=ast.Name("__cc_begin__", ast.Load()), args=[ast.Constant(index)], keywords=[])
+            new_body.append(ast.copy_location(ast.If(test=begin_call, body=[guarded], orelse=[]), stmt))
+        node.body = new_body
+        node.decorator_list = []
+        return node  # nested functions are deliberately not visited
+
+
+def _prune_synthetic():
+    """Drops a step's "statement executed" marker once the compatibility
+    layer observed a real Selenium call for that same step, so each step
+    shows only its genuine actions."""
+    with LOCK:
+        real = {(e["nodeid"], e["step"]) for e in EVENTS if not e.get("synthetic")}
+        EVENTS[:] = [e for e in EVENTS if not (e.get("synthetic") and (e["nodeid"], e["step"]) in real)]
+        try:
+            RUN_DIR.mkdir(parents=True, exist_ok=True)
+            (RUN_DIR / "steps.json").write_text(json.dumps(EVENTS, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _write_meta():
+    try:
+        RUN_DIR.mkdir(parents=True, exist_ok=True)
+        (RUN_DIR / "steps_meta.json").write_text(
+            json.dumps({**STEPS_META, "__run__": {"continuationEnabled": CONTINUE_ON_ERROR}}, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _register_meta(item):
+    """Records which steps the test *defines* (its Selenium IDE step
+    comments) so the report can show steps that never ran. Done at
+    collection time so it also exists when setup fails."""
+    if type(item).__name__ != "Function":
+        return None
+    function = inspect.unwrap(item.function)
+    try:
+        source_lines, first = inspect.getsourcelines(function)
+        filename = inspect.getsourcefile(function)
+    except Exception:
+        return None
+
+    last = first + len(source_lines) - 1
+    defined = [st for st in _load_step_comments(filename) if first <= st["line"] <= last] if filename else []
+    STEPS_META[item.nodeid] = {
+        "file": Path(filename).name if filename else None,
+        "defined_steps": [
+            {"number": st["number"], "action": st["action"], "target": st["target"], "value": st["value"]}
+            for st in defined
+        ],
+    }
+    return function, source_lines, first, filename
+
+
+def pytest_collection_modifyitems(session, config, items):
+    for item in items:
+        try:
+            _register_meta(item)
+        except Exception:
+            pass
+    _write_meta()
+
+
+def _install_step_guard(item):
+    registered = _register_meta(item)
+    if registered is None:
+        return
+    function, source_lines, first, filename = registered
+    _write_meta()
+
+    if not CONTINUE_ON_ERROR or not filename:
+        return
+    if inspect.iscoroutinefunction(function) or inspect.isgeneratorfunction(function):
+        return
+
+    tree = ast.parse(textwrap.dedent("".join(source_lines)))
+    if not tree.body or not isinstance(tree.body[0], ast.FunctionDef):
+        return
+    ast.increment_lineno(tree, first - 1)
+    tree = _Transformer(filename).visit(tree)
+    ast.fix_missing_locations(tree)
+    code = compile(tree, filename, "exec")
+
+    globals_ = function.__globals__
+    globals_["__cc_begin__"] = _begin
+    globals_["__cc_guard__"] = _Guard
+    namespace = {}
+    exec(code, globals_, namespace)
+    new_function = namespace[function.__name__]
+    new_function.__defaults__ = function.__defaults__
+    new_function.__kwdefaults__ = function.__kwdefaults__
+
+    instance = getattr(item, "instance", None)
+    item.obj = types.MethodType(new_function, instance) if instance is not None else new_function
+
+
+# ---------------------------------------------------------------------------
+# pytest hooks -- recognized automatically because this module's source is
 # the generated conftest.py itself (see module docstring).
 # ---------------------------------------------------------------------------
+import pytest as _pytest
+
+
+
 def pytest_runtest_setup(item):
     CUR.nodeid = item.nodeid
     CUR.typed_elements = []  # typed-field redaction state is per test
@@ -1636,6 +2091,7 @@ def pytest_runtest_setup(item):
     CUR.step_seq = 0  # live-event step numbering restarts for every test
     CUR.step_depth = 0
     CUR.pending_failure = None
+    CUR.driver = None  # the browser of the previous test is not this test's
 
 
 def pytest_runtest_logstart(nodeid, location):
@@ -1658,19 +2114,91 @@ def pytest_runtest_logreport(report):
         })
 
 
+@_pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item):
     CUR.nodeid = item.nodeid
+    CUR.failures = []
+    CUR.poisoned = {}
+    CUR.browser_dead = None
+    try:
+        _install_step_guard(item)
+    except Exception as exc:
+        print(f"[selenium_compat] step guard not installed for {item.nodeid}: {exc!r}", file=sys.stderr)
+
+    try:
+        result = yield
+    finally:
+        _prune_synthetic()
+
+    # Every statement ran to completion (or was skipped); if any swallowed a
+    # failure the test must still FAIL. The first original exception is
+    # re-raised so pytest's diagnostics still point at the user's own line.
+    failures = getattr(CUR, "failures", None) or []
+    if failures:
+        first = failures[0]
+        try:
+            first._cc_reraised = True
+        except Exception:
+            pass
+        raise first
+    return result
+
+
+def _record_unguarded_step_failure(item, call, error, screenshot):
+    """When the step guard is off (or could not wrap the failing statement)
+    the exception ends the test; attribute it to the defined step whose line
+    raised, taken from the traceback, so that step is not reported as
+    merely "not executed"."""
+    try:
+        test_file = os.path.normcase(os.path.abspath(str(item.path)))
+        line = None
+        for entry in call.excinfo.traceback:
+            if os.path.normcase(os.path.abspath(str(entry.path))) == test_file:
+                line = entry.lineno + 1  # outermost frame in the test file = the test body's own line
+                break
+        step = _step_for_line(str(item.path), line) if line else None
+        if step is None:
+            return
+        # Runs after the more specific records of pytest_runtest_makereport (a lookup, a wait, an
+        # assertion): the step then already has its FAIL record and nothing is added twice.
+        already = any(
+            e.get("nodeid") == item.nodeid and e.get("step") == step["number"] and e.get("status") == "FAIL"
+            for e in EVENTS
+        )
+        if not already:
+            _record("python", status="FAIL", error=error_repr(call.excinfo.value), screenshot=screenshot, step=step)
+    except Exception as exc:
+        print(f"[selenium_compat] could not attribute failure to a step: {exc!r}", file=sys.stderr)
+
+
+def error_repr(exc):
+    return _format_error(exc)
 
 
 def pytest_runtest_makereport(item, call):
-    if call.when != "call" or not call.excinfo:
+    if not call.excinfo:
         return
+    import traceback as _traceback
+    error = "".join(_traceback.format_exception_only(call.excinfo.type, call.excinfo.value)).strip()
+
+    if call.when == "setup":
+        # Browser/driver construction (or any fixture) failed before the test body ran.
+        # Recorded as a marker so the report can show every defined step as SKIPPED with
+        # this as the reason. (A setup failure is never reported as a test failure.)
+        _record("TEST_SETUP_FAILURE", duration=0, status="FAIL", error=error)
+        return
+    if call.when != "call":
+        return
+    if getattr(call.excinfo.value, "_cc_reraised", False):
+        return  # the step guard already recorded the failing statement as a step-level FAIL
+
     drv = getattr(getattr(item, "instance", None), "driver", None)
     if drv is None:
         for v in getattr(item, "funcargs", {}).values():
             if isinstance(v, WebDriver):
                 drv = v
                 break
+
     pending = getattr(CUR, "pending_failure", None)
     CUR.pending_failure = None
     if pending is not None and call.excinfo.value is pending["exc"]:
@@ -1687,27 +2215,28 @@ def pytest_runtest_makereport(item, call):
         extra = {}
         step = None
         try:
-            # The last traceback entry inside the test's own file (never a library or
-            # helper module, whose line numbers would mean nothing here).
-            for entry in reversed(list(call.excinfo.traceback)):
-                if Path(str(entry.path)) == Path(str(item.path)):
-                    line = entry.lineno + 1
-                    if 0 < line < 1_000_000:
-                        extra = {"source_line": line}
-                        # The test's frame is gone by now, so the IDE step comes from the line.
-                        step = _step_for_line(str(entry.path), line, "assert")
-                    break
+            # Entries inside the test's own file (never a library or helper module, whose line
+            # numbers would mean nothing here): the last one is where the assertion failed, the
+            # first one is the test body's own statement, which decides the Selenium IDE step.
+            entries = [e for e in call.excinfo.traceback if Path(str(e.path)) == Path(str(item.path))]
+            if entries:
+                line = entries[-1].lineno + 1
+                if 0 < line < 1_000_000:
+                    extra = {"source_line": line}
+                step = _step_for_line(str(item.path), entries[0].lineno + 1, "assert")
         except Exception:
             extra = {}
         _emit_failed_step("assert", call.excinfo.value, extra, step=step)
         # Stored too (class name only: the message or expression can contain secrets).
         _record_failed_step("assert", step, "", 0, drv, "AssertionError()")
-    import traceback as _traceback
+
+    # Anything else that ended the test inside a defined step (never twice: see above).
+    _record_unguarded_step_failure(item, call, error, sc)
     _record(
         "TEST_FAILURE",
         duration=0,
         status="FAIL",
-        error="".join(_traceback.format_exception_only(call.excinfo.type, call.excinfo.value)).strip(),
+        error=error,
         screenshot=sc,
     )
 
@@ -1718,3 +2247,4 @@ def pytest_sessionfinish(session, exitstatus):
         (RUN_DIR / "steps.json").write_text(json.dumps(EVENTS, indent=2), encoding="utf-8")
     except Exception:
         pass
+    _write_meta()

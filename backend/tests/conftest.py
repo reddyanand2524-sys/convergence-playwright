@@ -2,10 +2,31 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlalchemy.orm import sessionmaker
 
 from app.core.security import create_access_token, hash_password
 from app.database import engine, get_db
+
+# SQLite is only a test backend (the application targets SQL Server). SQLite needs two settings
+# to behave like the real database in these tests: foreign keys (ON DELETE CASCADE) are off by
+# default, and pysqlite does not start real transactions, which would defeat the rollback
+# isolation in db_session below.
+# (conftest is also imported as tests.conftest, so register the hooks only once per engine.)
+if engine.dialect.name == "sqlite" and not getattr(engine, "_sqlite_test_hooks", False):
+    engine._sqlite_test_hooks = True
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_connect(dbapi_connection, _record):
+        dbapi_connection.isolation_level = None  # we emit BEGIN ourselves
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    @event.listens_for(engine, "begin")
+    def _sqlite_begin(connection):
+        connection.exec_driver_sql("BEGIN")
+
 from app.main import app
 from app.models.project import Project
 from app.models.project_file import ProjectFile

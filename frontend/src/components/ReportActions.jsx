@@ -5,6 +5,7 @@ import {
   REPORT_FORMATS,
   downloadExcelReport,
   downloadHtmlReport,
+  downloadJsonReport,
   downloadPdfReport,
 } from "../services/runsApi.js";
 import { describeError } from "../services/authedFetch.js";
@@ -13,6 +14,7 @@ const DOWNLOADERS = {
   html: downloadHtmlReport,
   excel: downloadExcelReport,
   pdf: downloadPdfReport,
+  json: downloadJsonReport,
 };
 
 const UNAVAILABLE = "Reports are available only for completed or failed runs.";
@@ -75,7 +77,15 @@ export default function ReportActions({ projectId, run }) {
       saveBlob(blob, filename);
       setNotice({ kind: "success", text: `${label} report downloaded: ${filename}` });
     } catch (err) {
-      setNotice({ kind: "error", text: describeError(err, "Project or Run not found.") });
+      // A 404 for the JSON report usually means "no report stored for this run" (or storage disabled):
+      // show the server's explanation instead of the generic "Project or Run not found".
+      const jsonMissing = format === "json" && err?.status === 404;
+      setNotice({
+        kind: "error",
+        text: jsonMissing
+          ? (typeof err.detail === "string" && err.detail) || "No JSON execution report is available for this run."
+          : describeError(err, "Project or Run not found."),
+      });
     } finally {
       inFlight.current[format] = false;
       setPending((prev) => ({ ...prev, [format]: false }));
@@ -83,6 +93,7 @@ export default function ReportActions({ projectId, run }) {
   }
 
   return (
+    <>
     <div className="home-reports" ref={rootRef}>
       <button
         className="home-secondary-button"
@@ -114,17 +125,20 @@ export default function ReportActions({ projectId, run }) {
           ))}
         </div>
       )}
-
-      {!available && <p className="home-reports-hint">{UNAVAILABLE}</p>}
-
-      {notice && (
-        <p
-          className={`home-notice is-${notice.kind} home-reports-notice`}
-          role={notice.kind === "error" ? "alert" : "status"}
-        >
-          {notice.text}
-        </p>
-      )}
     </div>
+
+    {/* Siblings of .home-reports (not children), so the Reports control stays one
+        button tall and lines up with its neighbours; each wraps to its own full row. */}
+    {!available && <p className="home-reports-hint">{UNAVAILABLE}</p>}
+
+    {notice && (
+      <p
+        className={`home-notice is-${notice.kind} home-reports-notice`}
+        role={notice.kind === "error" ? "alert" : "status"}
+      >
+        {notice.text}
+      </p>
+    )}
+    </>
   );
 }

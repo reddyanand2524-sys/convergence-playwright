@@ -46,6 +46,7 @@
     <strong>Run duration:</strong> {{ "%.2f"|format(run.duration_seconds) if run.duration_seconds is not none else "—" }}s &nbsp;|&nbsp;
     <strong>Cancel requested:</strong> {{ run.cancel_requested }}
   </div>
+  {% if notice %}<div class="meta" role="note" style="color:#b45309;font-weight:bold">{{ notice }}</div>{% endif %}
 
   <div class="summary-grid">
     <div class="summary-tile"><div class="value">{{ summary.total_tests }}</div>Total tests</div>

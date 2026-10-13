@@ -26,6 +26,7 @@ from app.models.project import Project
 from app.models.project_file import ProjectFile
 from app.models.run import Run
 from app.models.run_result import RunResult
+from app.services.run_issue_service import describe_run_issue, parse_run_note
 from app.models.screenshot import Screenshot
 from app.models.step_result import StepResult
 from app.models.test_result import TestResult
@@ -135,6 +136,9 @@ class ReportData:
     run: RunData
     summary: SummaryData
     tests: list[TestData] = field(default_factory=list)
+    # Set when the run did not end normally (stopped at the time limit: partial results; saving
+    # failed) or recorded no tests: a report must not read like a clean, complete run.
+    notice: str | None = None
 
 
 def _display_name(action: str, target: str | None, value: str | None) -> str:
@@ -361,4 +365,17 @@ def build_report_data(db: Session, run: Run, project: Project) -> ReportData:
 
     project_data = ProjectData(id=project.id, name=project.name)
 
-    return ReportData(project=project_data, run=run_data, summary=summary, tests=tests)
+    notice = None
+    if run_result is not None:
+        note = parse_run_note(run_result.stderr)
+        if note is not None:
+            kind, detail = note
+            notice = f"Partial results: {detail}." if kind == "timeout" else f"Results incomplete: {detail}."
+        elif total_tests == 0 and run.status in ("COMPLETED", "FAILED"):
+            issue = describe_run_issue(
+                run_status=run.status, has_run_result=True, exit_code=run_result.exit_code,
+                stdout=None, stderr=None, file_names=[],
+            )
+            notice = f"{issue.title}." if issue else None
+
+    return ReportData(project=project_data, run=run_data, summary=summary, tests=tests, notice=notice)

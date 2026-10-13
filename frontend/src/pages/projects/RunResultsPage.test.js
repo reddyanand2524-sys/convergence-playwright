@@ -10,6 +10,10 @@ test("a finished run without results shows the backend's explanation instead of 
   assert.match(page, /No test results were captured for this run\./);
 });
 
+test("partial results (a timed-out run) show the explanation above the recorded tests", () => {
+  assert.match(page, /tests\.length > 0 && data\.issue && <RunIssueNotice issue=\{data\.issue\} \/>/);
+});
+
 test("the explanation shows title, detail, hints, the real exit code and the output tail as plain text", () => {
   for (const field of ["issue.title", "issue.detail", "issue.hints", "issue.exit_code", "issue.output_tail"]) {
     assert.ok(page.includes(field), field);

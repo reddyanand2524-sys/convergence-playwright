@@ -472,11 +472,12 @@ def test_report_404_cross_user(
 
     import uuid
 
-    tag = uuid.uuid4().int
+    # Unique per test run: must not collide with rows already in a shared database.
+    unique = uuid.uuid4().hex[:12]
     other_user = User(
         full_name="Other User",
-        email=f"phase7-other-{tag}@example.com",
-        mobile_number=f"9{tag % 10**9:09d}",
+        email=f"phase7-other-user-{unique}@example.com",
+        mobile_number="8" + str(uuid.uuid4().int % 10**9).rjust(9, "0"),
         password_hash=hash_password("Password123!"),
         is_active=True,
     )

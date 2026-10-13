@@ -144,3 +144,85 @@ def describe_run_issue(
         hints=["Check that the uploaded files define tests."],
         **base,
     )
+
+
+# ---------------------------------------------------------------------------
+# Run notes: a run that did not end normally says so, in its stored data
+# ---------------------------------------------------------------------------
+# When a run is stopped at the execution time limit, or its results could not be saved, the
+# backend stores a one-line note at the top of that run's stderr ("[convergence] timeout: ...").
+# It is how the results API, the reports and the UI tell "partial results" and "saving failed"
+# apart from an ordinary run, without a schema change. It is written by the backend after the
+# process output was sanitized, so nothing the test printed can end up in it.
+RUN_NOTE_PREFIX = "[convergence] "
+_NOTE_KINDS = ("timeout", "save-failed")
+
+
+def make_run_note(kind: str, detail: str) -> str:
+    return f"{RUN_NOTE_PREFIX}{kind}: {detail}\n"
+
+
+def parse_run_note(stderr: str | None) -> tuple[str, str] | None:
+    """(kind, detail) of the run note at the top of a stored stderr, or None."""
+    if not stderr or not stderr.startswith(RUN_NOTE_PREFIX):
+        return None
+    kind, _, detail = stderr.split("\n", 1)[0][len(RUN_NOTE_PREFIX):].partition(": ")
+    return (kind, detail) if kind in _NOTE_KINDS else None
+
+
+def strip_run_note(stderr: str | None) -> str | None:
+    return stderr.split("\n", 1)[1] if parse_run_note(stderr) and "\n" in (stderr or "") else (
+        None if parse_run_note(stderr) else stderr
+    )
+
+
+def describe_run_note(
+    note: tuple[str, str],
+    *,
+    total_tests: int,
+    unfinished_tests: int,
+    exit_code: int | None,
+    stdout: str | None,
+    stderr: str | None,
+    secrets: Iterable[str] = (),
+) -> RunIssue:
+    """The explanation for a run whose stored note says it was stopped or could not be saved."""
+    kind, detail = note
+    tail = _tail(stdout, strip_run_note(stderr), tuple(secrets))
+    if kind == "timeout":
+        import re
+
+        match = re.search(r"after (\d+)s", detail)
+        limit = f"{match.group(1)} s" if match else "the execution time limit"
+        recorded = (
+            f"{total_tests} test(s) were recorded" + (f", {unfinished_tests} of them did not finish" if unfinished_tests else "")
+            if total_tests else "no test had been recorded yet"
+        )
+        return RunIssue(
+            code="RUN_TIMED_OUT",
+            title="The run timed out; these results are partial",
+            detail=(
+                f"The run was stopped after {limit} (the execution time limit) before pytest finished, "
+                f"so {recorded}. Everything recorded up to that moment is shown."
+            ),
+            hints=[
+                "A test that was still running is marked ERROR: it did not finish, so its outcome is unknown.",
+                "Each element that is not found can cost about 30 s with the default waits, so several failed "
+                "steps can use up the whole limit. Fixing the failing locators is the first thing to try.",
+                "The limit is TEST_EXECUTION_TIMEOUT_SECONDS on the backend (default 120).",
+            ],
+            exit_code=exit_code,
+            output_tail=tail,
+        )
+    return RunIssue(
+        code="RESULTS_SAVE_FAILED",
+        title="The test ran, but saving its results failed",
+        detail=(
+            f"pytest finished, but storing the results was not possible ({detail}). "
+            "No test results or reports exist for this run, although the test itself did execute."
+        ),
+        hints=["The backend log for this run (look for 'stage=persist') holds the technical details.",
+               "Run it again; if it keeps happening the database needs attention."],
+        exit_code=exit_code,
+        output_tail=tail,
+    )

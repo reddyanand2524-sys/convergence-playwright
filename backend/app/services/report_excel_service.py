@@ -96,6 +96,7 @@ def render_excel_report(report: ReportData) -> bytes:
         ("Failure Count", report.summary.failure_count),
         ("Test Duration (s)", report.summary.duration_seconds),
         ("Exit Code", report.summary.exit_code),
+        ("Notice", _sanitize_cell_value(report.notice) if report.notice else ""),
     ]
     for field_name, value in rows:
         ws_summary.append([field_name, value])

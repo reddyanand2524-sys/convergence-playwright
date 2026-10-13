@@ -323,6 +323,7 @@ def test_the_run_itself_behaved_normally(run_events):
     # exactly the two intentionally failing tests (assert, wait is caught by pytest.raises -> passes)
     assert run_events.returncode == 1
     steps_json = json.loads((run_events.tmp / "steps.json").read_text(encoding="utf-8"))
-    assert set(steps_json[0]) == {"nodeid", "step", "action", "target", "value", "runtime_value",
-                                  "status", "duration", "error", "screenshot", "timestamp"}
+    # every existing key is still there (the continue-after-failure work added more: started_at, url, ...)
+    assert {"nodeid", "step", "action", "target", "value", "runtime_value",
+            "status", "duration", "error", "screenshot", "timestamp"} <= set(steps_json[0])
     assert "1 failed" in run_events.output

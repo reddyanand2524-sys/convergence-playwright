@@ -176,10 +176,11 @@ def test_steps_json_and_screenshots_are_unchanged_by_events(tmp_path):
     _run_pytest_with_gate(tmp_path)
     steps = json.loads((tmp_path / "steps.json").read_text(encoding="utf-8"))
     assert [s["action"] for s in steps if s["nodeid"].endswith("::test_ok")] == ["open", "type", "click"]
-    assert set(steps[0]) == {
+    # every existing key is still there (the continue-after-failure work added more: started_at, url, ...)
+    assert {
         "nodeid", "step", "action", "target", "value", "runtime_value",
         "status", "duration", "error", "screenshot", "timestamp",
-    }
+    } <= set(steps[0])
     # the typed value is still recorded for the backend's own masking, exactly as before
     assert any(s["runtime_value"] == TYPED for s in steps)
     failed = [s for s in steps if s["status"] == "FAIL" and s["action"] == "click"]

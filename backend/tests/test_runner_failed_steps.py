@@ -144,10 +144,13 @@ def test_failing_lookup_before_a_mouse_over_is_the_failed_step_in_the_results(cl
 
     assert test["status"] == "FAILED"
     steps = test["steps"]
+    # The step guard keeps going after a failed statement: the mouse-over that depends on the element
+    # that was never found is recorded as SKIPPED (it did not run), not as passed.
     assert [(s["step_number"], s["action"], s["status"]) for s in steps] == [
         (1, "open", "PASS"), (2, "setWindowSize", "PASS"), (3, "click", "PASS"), (4, "find", "FAIL"),
+        (4, "mouseOver", "SKIP"),
     ]
-    failed = steps[-1]
+    failed = steps[3]
     assert "Shop Now" in failed["target"]                                  # the locator of the failing lookup
     assert failed["error"].startswith("NoSuchElementException: ")          # type and sanitized message
     assert "Unable to locate element" in failed["error"] and "Stacktrace" not in failed["error"]
@@ -187,7 +190,9 @@ def test_selenium_behaviour_is_untouched_no_retry_skip_or_changed_exception(tmp_
     assert "NoSuchElementException" in output and "Unable to locate element" in output
     assert "ActionChains" not in [e.get("action") for e in events_of(tmp_path)]   # the mouse-over after it never ran
     steps = json.loads((tmp_path / "steps.json").read_text(encoding="utf-8"))
-    assert [s["status"] for s in steps if s["action"] != "TEST_FAILURE"] == ["PASS", "PASS", "PASS", "FAIL"]
+    assert [s["status"] for s in steps if s["action"] != "TEST_FAILURE"] == ["PASS", "PASS", "PASS", "FAIL", "SKIP"]
+    skipped = [s for s in steps if s["status"] == "SKIP"][0]
+    assert skipped["action"] == "mouseOver" and "element" in skipped["skip_reason"]   # skipped, with its reason
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +236,11 @@ def test_a_caught_lookup_is_not_blamed_for_a_later_unrelated_failure(client, db_
     run, _, _ = run_script(db_session, test_project, tmp_path, monkeypatch, CAUGHT_THEN_OTHER_FAILURE)
     (test,) = results_json(client, test_project, run, auth_headers)["tests"]
     assert test["status"] == "FAILED"
-    assert [(s["action"], s["status"]) for s in test["steps"]] == [("open", "PASS")]     # the earlier lookup is not a failure of this test
+    # The plain statement that raised is attributed to its IDE step (1); the earlier lookup that the
+    # test caught itself is not recorded as a failed step at all.
+    assert [(s["action"], s["status"]) for s in test["steps"]] == [("open", "PASS"), ("open", "FAIL")]
+    assert "find" not in [s["action"] for s in test["steps"]]
+    assert test["steps"][-1]["error"].startswith("RuntimeError")
     assert test["failure"]["exception_type"].endswith("RuntimeError")
 
 
@@ -293,7 +302,8 @@ def test_a_failed_assertion_is_a_failed_step_without_its_expression_or_message(c
     run, _, _ = run_script(db_session, test_project, tmp_path, monkeypatch, ASSERTION)
     (test,) = results_json(client, test_project, run, auth_headers)["tests"]
     last = test["steps"][-1]
-    assert (last["action"], last["status"], last["step_number"], last["error"]) == ("assert", "FAIL", 2, "AssertionError()")
+    # recorded under the Selenium IDE step it belongs to (its own action name), class name only
+    assert (last["action"], last["status"], last["step_number"], last["error"]) == ("assertText", "FAIL", 2, "AssertionError()")
     assert last["value"] in (None, "")                                   # the IDE step's expected text is never stored
     steps_json = json.dumps(test["steps"]) + json.dumps(events_of(tmp_path))
     assert "message-secret-9" not in steps_json and "Welcome-SECRET-EXPECTED" not in steps_json
@@ -302,9 +312,12 @@ def test_a_failed_assertion_is_a_failed_step_without_its_expression_or_message(c
 def test_typed_text_from_the_ide_step_is_never_stored_with_a_failed_lookup(client, db_session, test_project, auth_headers, tmp_path, monkeypatch):
     run, _, _ = run_script(db_session, test_project, tmp_path, monkeypatch, TYPED_BEFORE_FAILURE)
     (test,) = results_json(client, test_project, run, auth_headers)["tests"]
-    last = test["steps"][-1]
+    last = [s for s in test["steps"] if s["status"] == "FAIL"][0]
     assert (last["action"], last["status"], last["step_number"]) == ("find", "FAIL", 2)
     assert last["value"] in (None, "")
+    skipped = [s for s in test["steps"] if s["status"] == "SKIP"]            # the dependent type step did not run
+    assert [(s["action"], s["step_number"]) for s in skipped] == [("type", 2)]
+    assert skipped[0]["value"] in (None, "", "***")                          # and its typed text is masked
     persisted = (tmp_path / "steps.json").read_text(encoding="utf-8")
     failed_record = [s for s in json.loads(persisted) if s["status"] == "FAIL" and s["action"] == "find"][0]
     assert failed_record["value"] == "" and failed_record["runtime_value"] == ""

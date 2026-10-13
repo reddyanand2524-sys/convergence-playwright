@@ -116,6 +116,8 @@ def render_pdf_report(report: ReportData) -> bytes:
     for line in meta_lines:
         story.append(Paragraph(line, normal_style))
 
+    if report.notice:
+        story.append(Paragraph(f"<b>Notice:</b> {_esc(report.notice)}", normal_style))
     story.append(Spacer(1, 6))
     story.append(Paragraph(f"Status: {_esc(run.status)}", status_style))
     story.append(Spacer(1, 14))

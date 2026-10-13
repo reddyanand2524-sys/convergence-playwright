@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.database import Base, engine
@@ -33,6 +34,11 @@ from app.services import scheduler_service
 # ============================================================
 
 Base.metadata.create_all(bind=engine)
+
+
+from app.services.result_persistence_service import report_column_available  # noqa: E402
+
+report_column_available()  # adds run_results.report_json when the DB login may; otherwise logs the DDL
 
 
 @asynccontextmanager
@@ -112,12 +118,15 @@ def health():
             "database_status": row[0],
         }
 
-    except Exception as exc:
-        return {
-            "status": "unhealthy",
-            "database": "disconnected",
-            "error": str(exc),
-        }
+    except Exception:
+        # Never echo the driver error to clients (it can contain host/login details); log it instead.
+        import logging
+
+        logging.getLogger(__name__).exception("Health check: database unreachable")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "database": "disconnected"},
+        )
 
 
 

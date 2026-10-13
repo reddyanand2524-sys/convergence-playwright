@@ -84,5 +84,6 @@ def render_html_report(report: ReportData) -> str:
         run=report.run,
         summary=report.summary,
         tests=tests_ctx,
+        notice=report.notice,
     )
     return html
