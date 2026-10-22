@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Search, X } from "lucide-react";
 
+import { FRAMEWORK_OPTIONS } from "../utils/framework.js";
+
 const STATUS_OPTIONS = ["QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"];
 // Run browsers come back lowercase from the API (e.g. "chrome"); the labels are
 // the same browsers the app already offers when creating a project.
@@ -14,6 +16,7 @@ export const EMPTY_FILTERS = {
   search: "",
   status: "",
   browser: "",
+  framework: "",
   run_id: "",
   created_from: "",
   created_to: "",
@@ -91,6 +94,16 @@ export default function RunHistoryFilters({ applied, busy, onApply, onClear }) {
             <option value="">All Browsers</option>
             {BROWSER_FILTERS.map((browser) => (
               <option key={browser.value} value={browser.value}>{browser.label}</option>
+            ))}
+          </select>
+        </label>
+
+        <label className="home-filter-field">
+          <span>Framework</span>
+          <select value={draft.framework} onChange={set("framework")}>
+            <option value="">All Frameworks</option>
+            {FRAMEWORK_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
             ))}
           </select>
         </label>

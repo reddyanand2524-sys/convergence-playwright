@@ -4,6 +4,11 @@ import { X } from "lucide-react";
 import { FREQUENCIES, createSchedule, updateSchedule } from "../services/schedulesApi.js";
 import { describeError } from "../services/authedFetch.js";
 import { localInputToServerUtc, serverUtcToLocalInput } from "../utils/format.js";
+import {
+  defaultScheduleBrowser,
+  scheduleBrowserOptions,
+  showsPlaywrightScheduleHint,
+} from "../utils/scheduleBrowser.js";
 
 const FREQUENCY_LABELS = {
   ONCE: "Once",
@@ -12,14 +17,6 @@ const FREQUENCY_LABELS = {
   DAILY: "Daily",
   WEEKLY: "Weekly",
 };
-
-// Run browsers are lower-case in the API ("chrome"); the backend does not
-// validate this field, so only the browsers the app supports are offered.
-const BROWSERS = [
-  { value: "chrome", label: "Chrome" },
-  { value: "firefox", label: "Firefox" },
-  { value: "edge", label: "Edge" },
-];
 
 const FIELD_NAMES = ["name", "browser", "frequency", "interval_value", "start_at"];
 
@@ -61,7 +58,7 @@ export default function ScheduleForm({ projectId, project, schedule, onClose, on
 
   const [values, setValues] = useState(() => ({
     name: schedule?.name ?? "",
-    browser: schedule?.browser ?? (BROWSERS.some((b) => b.value === String(project?.browser).toLowerCase()) ? String(project.browser).toLowerCase() : "chrome"),
+    browser: schedule?.browser ?? defaultScheduleBrowser(project),
     frequency: schedule?.frequency ?? "ONCE",
     interval_value: schedule?.interval_value != null ? String(schedule.interval_value) : "",
     start_at: initialStart,
@@ -77,10 +74,11 @@ export default function ScheduleForm({ projectId, project, schedule, onClose, on
     setErrors((prev) => ({ fields: { ...prev.fields, [field]: undefined }, general: [] }));
   };
 
-  // A browser value the dropdown does not know (set elsewhere) must not be lost.
-  const browserOptions = BROWSERS.some((b) => b.value === values.browser)
-    ? BROWSERS
-    : [{ value: values.browser, label: values.browser }, ...BROWSERS];
+  // Run browsers are lower-case in the API ("chrome"). Selenium projects offer Chrome / Firefox /
+  // Edge; Playwright projects offer Chrome. A stored value outside that list (set elsewhere) must
+  // not be lost, so it stays visible until the user picks something else.
+  const browserOptions = scheduleBrowserOptions(project, values.browser);
+  const playwrightHint = showsPlaywrightScheduleHint(project);
 
   function validate() {
     const fields = {};
@@ -191,7 +189,14 @@ export default function ScheduleForm({ projectId, project, schedule, onClose, on
           <div className="home-schedule-row">
             <div className="home-form-field">
               <label htmlFor="sch-browser">Browser</label>
-              <select id="sch-browser" value={values.browser} onChange={set("browser")} disabled={saving} aria-invalid={Boolean(fe.browser)}>
+              <select
+                id="sch-browser"
+                value={values.browser}
+                onChange={set("browser")}
+                disabled={saving}
+                aria-invalid={Boolean(fe.browser)}
+                aria-describedby={playwrightHint ? "sch-browser-hint" : undefined}
+              >
                 {browserOptions.map((b) => (
                   <option key={b.value} value={b.value}>{b.label}</option>
                 ))}
@@ -209,6 +214,13 @@ export default function ScheduleForm({ projectId, project, schedule, onClose, on
               {fe.frequency && <p className="home-form-error" role="alert">{fe.frequency}</p>}
             </div>
           </div>
+
+          {playwrightHint && (
+            <p id="sch-browser-hint" className="home-field-hint">
+              Chrome is the available browser for Playwright schedules. The server decides whether a
+              schedule is allowed for this project; if it refuses, its message is shown here.
+            </p>
+          )}
 
           {values.frequency === "INTERVAL" && (
             <div className="home-form-field">

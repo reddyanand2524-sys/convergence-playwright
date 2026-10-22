@@ -1342,6 +1342,11 @@ code, kbd, samp, pre,
   color: var(--color-critical);
   font-size: 13px;
 }
+.home-form-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
 .home-modal-actions {
   display: flex;
   justify-content: flex-end;

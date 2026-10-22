@@ -9,6 +9,7 @@ import {
   downloadPdfReport,
 } from "../services/runsApi.js";
 import { describeError } from "../services/authedFetch.js";
+import { hasReport } from "../utils/runStatus.js";
 
 const DOWNLOADERS = {
   html: downloadHtmlReport,
@@ -46,7 +47,7 @@ export default function ReportActions({ projectId, run }) {
   const inFlight = useRef({}); // per-format guard against double clicks
   const rootRef = useRef(null);
 
-  const available = run.status === "COMPLETED" || run.status === "FAILED";
+  const available = hasReport(run.status);
   const busy = Object.values(pending).some(Boolean);
 
   useEffect(() => {

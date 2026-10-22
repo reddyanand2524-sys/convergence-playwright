@@ -16,8 +16,8 @@ import useRunEvents from "../../hooks/useRunEvents.js";
 import { getRun } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 import { formatDateTime, formatDuration } from "../../utils/format.js";
-
-const POLL_WHILE = ["QUEUED", "RUNNING"];
+import { ACTIVE_STATUSES, hasReport } from "../../utils/runStatus.js";
+import { frameworkLabel, frameworkOf, isPlaywright } from "../../utils/framework.js";
 
 export default function RunDetailsPage() {
   const { project } = useOutletContext();
@@ -72,7 +72,7 @@ export default function RunDetailsPage() {
     runId,
     view.status === "ready" ? run.status : null,
     applyRun,
-    { activeStatuses: POLL_WHILE }
+    { activeStatuses: ACTIVE_STATUSES }
   );
 
   // Live step events for the run on screen; independent of the poll above and of the viewer.
@@ -121,6 +121,7 @@ export default function RunDetailsPage() {
           <dl className="home-config-card">
             <div><dt>Run ID</dt><dd>{run.id}</dd></div>
             <div><dt>Project ID</dt><dd>{run.project_id}</dd></div>
+            <div><dt>Framework</dt><dd>{frameworkLabel(run)}</dd></div>
             <div><dt>Status</dt><dd>{run.status}</dd></div>
             <div><dt>Browser (captured at creation)</dt><dd>{run.browser}</dd></div>
             <div><dt>Created</dt><dd>{formatDateTime(run.created_at)}</dd></div>
@@ -132,7 +133,8 @@ export default function RunDetailsPage() {
 
           {/* One slot, in the position the old loader had, so LiveBrowserViewer below keeps its place in the tree. */}
           {run.status === "RUNNING" || events.engaged ? (
-            events.connection === "error" && events.timeline.rows.length === 0 ? (
+            events.connection === "error" &&
+            (isPlaywright(run) ? events.timeline.tests.length === 0 : events.timeline.rows.length === 0) ? (
               <LoadingState type="converge" label="Run in progress — results appear when it completes" className="cv-run-loader" />
             ) : (
               <StepTimeline
@@ -140,12 +142,14 @@ export default function RunDetailsPage() {
                 connection={events.connection}
                 error={events.error}
                 runStatus={run.status}
+                framework={frameworkOf(run)}
                 resultsHref={run.status === "FAILED" ? `/projects/${project.id}/runs/${run.id}/results` : undefined}
               />
             )
           ) : null}
 
-          <LiveBrowserViewer run={run} />
+          {/* The viewer is the Selenium noVNC display; Playwright runs do not use it. */}
+          {!isPlaywright(run) && <LiveBrowserViewer run={run} />}
 
           {retriedFrom && (
             <p className="home-notice is-success" role="status">
@@ -155,7 +159,7 @@ export default function RunDetailsPage() {
           )}
 
           <div className="home-run-actions" key={run.id}>
-            {(run.status === "COMPLETED" || run.status === "FAILED") && (
+            {hasReport(run.status) && (
               <Link className="home-primary-button" to={`/projects/${project.id}/runs/${run.id}/results`}>
                 View Results
               </Link>

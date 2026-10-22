@@ -3,6 +3,7 @@ import { XCircle } from "lucide-react";
 
 import { cancelRun, getRun } from "../services/runsApi.js";
 import { describeError } from "../services/authedFetch.js";
+import { isActive, runStateChanged } from "../utils/runStatus.js";
 
 const NOT_FOUND = "Project or Run not found.";
 
@@ -22,7 +23,7 @@ export default function CancelRunControl({ projectId, run, onUpdate }) {
   const [notice, setNotice] = useState(null);
   const inFlight = useRef(false);
 
-  const cancellable = run.status === "QUEUED" || run.status === "RUNNING";
+  const cancellable = isActive(run.status);
 
   // Not cancellable (any more): hide the button, but keep showing why if a
   // cancel attempt left a message (e.g. 409 after the run already finished).
@@ -44,9 +45,14 @@ export default function CancelRunControl({ projectId, run, onUpdate }) {
       if (err?.status === 409) {
         try {
           const fresh = await getRun(projectId, run.id);
-          setOpen(false);
-          setNotice({ kind: "info", text: "Run state has changed. Showing the latest status." });
-          onUpdate(fresh);
+          if (runStateChanged(run, fresh)) {
+            setOpen(false);
+            setNotice({ kind: "info", text: "Run state has changed. Showing the latest status." });
+            onUpdate(fresh);
+          } else {
+            // Nothing changed underneath us: keep the dialog and show the backend's reason.
+            setNotice({ kind: "error", text: `Unable to cancel run. ${describeError(err, NOT_FOUND)}` });
+          }
         } catch (refreshErr) {
           setNotice({ kind: "error", text: `${err.message} ${describeError(refreshErr, NOT_FOUND)}` });
         }

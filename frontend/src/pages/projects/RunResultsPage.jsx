@@ -12,8 +12,9 @@ import useRunPolling from "../../hooks/useRunPolling.js";
 import { getRunResults } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 import { formatDuration, formatSeconds } from "../../utils/format.js";
+import { ACTIVE_STATUSES, hasReport } from "../../utils/runStatus.js";
+import { frameworkLabel, frameworkOf } from "../../utils/framework.js";
 
-const ACTIVE = ["QUEUED", "RUNNING"];
 const statusOf = (results) => results.run.status;
 
 const WAITING_MESSAGE = {
@@ -76,7 +77,7 @@ export default function RunResultsPage() {
     runId,
     view.status === "ready" ? data.run.status : null,
     applyResults,
-    { fetcher: getRunResults, activeStatuses: ACTIVE, statusOf }
+    { fetcher: getRunResults, activeStatuses: ACTIVE_STATUSES, statusOf }
   );
 
   const runPath = `/projects/${project.id}/runs/${runId}`;
@@ -155,6 +156,7 @@ function ResultsBody({ data, projectId, polling }) {
         </div>
         <div className="home-results-meta">
           <RunStatusBadge status={run.status} />
+          <span>{frameworkLabel(run)}</span>
           <span>{run.browser}</span>
           {duration && <span>{duration}</span>}
         </div>
@@ -195,13 +197,13 @@ function ResultsBody({ data, projectId, polling }) {
       {Array.isArray(tests) && tests.length > 0 && (
         <div className="home-test-list">
           {tests.map((test) => (
-            <TestResultCard key={test.id} test={test} projectId={projectId} runId={run.id} />
+            <TestResultCard key={test.id} test={test} projectId={projectId} runId={run.id} framework={frameworkOf(run)} />
           ))}
         </div>
       )}
 
-      {(run.status === "COMPLETED" || run.status === "FAILED") && (
-        <ExecutionReportPanel key={run.id} projectId={projectId} runId={run.id} />
+      {hasReport(run.status) && (
+        <ExecutionReportPanel key={run.id} projectId={projectId} runId={run.id} framework={frameworkOf(run)} />
       )}
 
       <p className="home-results-note">

@@ -4,18 +4,22 @@ import { ChevronRight, FileCode2, Upload, X } from "lucide-react";
 import { createProject } from "../services/projectsApi.js";
 import { uploadProjectFiles } from "../services/filesApi.js";
 import { describeError } from "../services/authedFetch.js";
-import { BROWSER_OPTIONS, FREQUENCY_OPTIONS } from "../constants/projectOptions.js";
+import { FREQUENCY_OPTIONS } from "../constants/projectOptions.js";
+import { DEFAULT_FRAMEWORK, FRAMEWORK_OPTIONS, frameworkLabel } from "../utils/framework.js";
+import { browserAfterFrameworkChange, browserOptionsFor } from "../utils/projectForm.js";
 
 /*
  * Create Project flow (details -> summary -> Save Project).
- * Frequency and Browser are sent to POST /projects: the current backend
- * CreateProjectRequest requires them. "Save Project" does NOT start a run;
- * there is no execution API yet.
+ * Frequency, Browser and Framework are sent to POST /projects. Selenium is the default;
+ * Playwright restricts the browser to Chrome. Whether Playwright can run is decided by the
+ * backend: a refusal (403 / 409 / 422) is shown with its own message. "Save Project" does
+ * NOT start a run.
  */
 export default function CreateProjectModal({ onClose, onCreated }) {
   const [step, setStep] = useState("details");
   const [name, setName] = useState("");
   const [frequency, setFrequency] = useState("5 minutes");
+  const [framework, setFramework] = useState(DEFAULT_FRAMEWORK);
   const [browser, setBrowser] = useState("Chrome");
   const [files, setFiles] = useState([]);
   const [fileError, setFileError] = useState("");
@@ -45,6 +49,7 @@ export default function CreateProjectModal({ onClose, onCreated }) {
         name: name.trim(),
         frequency,
         browser,
+        framework,
       });
     } catch (err) {
       setSaveError(describeError(err));
@@ -67,6 +72,13 @@ export default function CreateProjectModal({ onClose, onCreated }) {
   }
 
   const isSummary = step === "summary";
+  const browserOptions = browserOptionsFor(framework, browser);
+  const browserShown = browserOptions.find((option) => option.value === browser)?.label ?? browser;
+
+  function onFrameworkChange(next) {
+    setFramework(next);
+    setBrowser((current) => browserAfterFrameworkChange(next, current, null));
+  }
 
   return (
     <div
@@ -133,14 +145,33 @@ export default function CreateProjectModal({ onClose, onCreated }) {
               </div>
 
               <div className="home-form-field">
+                <label htmlFor="home-project-framework">Framework</label>
+                <select
+                  id="home-project-framework"
+                  value={framework}
+                  onChange={(event) => onFrameworkChange(event.target.value)}
+                >
+                  {FRAMEWORK_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                {framework === "playwright" && (
+                  <p className="home-form-hint">
+                    Playwright projects run in Chrome only. The server confirms whether Playwright
+                    is available when you save or run the project.
+                  </p>
+                )}
+              </div>
+
+              <div className="home-form-field">
                 <label htmlFor="home-project-browser">Browser Type</label>
                 <select
                   id="home-project-browser"
                   value={browser}
                   onChange={(event) => setBrowser(event.target.value)}
                 >
-                  {BROWSER_OPTIONS.map((option) => (
-                    <option key={option}>{option}</option>
+                  {browserOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
                 </select>
               </div>
@@ -202,7 +233,8 @@ export default function CreateProjectModal({ onClose, onCreated }) {
             <dl>
               <div><dt>Project name</dt><dd>{name.trim()}</dd></div>
               <div><dt>Frequency</dt><dd>{frequency}</dd></div>
-              <div><dt>Browser Type</dt><dd>{browser}</dd></div>
+              <div><dt>Framework</dt><dd>{frameworkLabel({ framework })}</dd></div>
+              <div><dt>Browser Type</dt><dd>{browserShown}</dd></div>
               <div>
                 <dt>Python files</dt>
                 <dd>{files.length} {files.length === 1 ? "file" : "files"}</dd>

@@ -6,8 +6,8 @@ import RunStateMessage from "./RunStateMessage.jsx";
 import CancelRunControl from "./CancelRunControl.jsx";
 import useRunPolling from "../hooks/useRunPolling.js";
 import { formatDateTime } from "../utils/format.js";
-
-const FOLLOW = ["QUEUED", "RUNNING"];
+import { ACTIVE_STATUSES, isActive } from "../utils/runStatus.js";
+import { frameworkLabel } from "../utils/framework.js";
 
 /*
  * One run started from the Run tab. Each card owns its run's state and its own
@@ -22,12 +22,12 @@ export default function StartedRunCard({ projectId, initialRun, onSettled }) {
     (fresh) => {
       if (String(fresh?.id) !== String(initialRun.id)) return; // never take another run's data
       setRun(fresh);
-      if (fresh.status !== "RUNNING" && fresh.status !== "QUEUED") onSettled?.(fresh);
+      if (!isActive(fresh.status)) onSettled?.(fresh);
     },
     [initialRun.id, onSettled]
   );
 
-  const polling = useRunPolling(projectId, run.id, run.status, apply, { activeStatuses: FOLLOW });
+  const polling = useRunPolling(projectId, run.id, run.status, apply, { activeStatuses: ACTIVE_STATUSES });
 
   return (
     <section className="home-run-created" aria-label={`Started run ${run.id}`}>
@@ -35,6 +35,7 @@ export default function StartedRunCard({ projectId, initialRun, onSettled }) {
       <dl className="home-config-card">
         <div><dt>Run ID</dt><dd>#{run.id}</dd></div>
         <div><dt>Status</dt><dd><RunStatusBadge status={run.status} /></dd></div>
+        <div><dt>Framework</dt><dd>{frameworkLabel(run)}</dd></div>
         <div><dt>Browser</dt><dd>{run.browser}</dd></div>
         <div><dt>Started</dt><dd>{formatDateTime(run.started_at, "Not started")}</dd></div>
       </dl>

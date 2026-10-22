@@ -24,17 +24,40 @@ export class ApiError extends Error {
   }
 }
 
+// Trailing slashes are dropped so `${base}${path}` never contains "//".
+export function normalizeBase(base) {
+  return typeof base === "string" ? base.trim().replace(/\/+$/, "") : "";
+}
+
 function baseUrl() {
-  const base = import.meta.env.VITE_API_BASE_URL;
+  let raw;
+
+  try {
+    // Kept as a plain `import.meta.env.VITE_*` access so Vite inlines it at build
+    // time. Outside Vite (node --test) import.meta.env is undefined and this throws.
+    raw = import.meta.env.VITE_API_BASE_URL;
+  } catch {
+    raw = undefined;
+  }
+
+  const base = normalizeBase(raw);
 
   if (!base) {
     throw new ApiError("VITE_API_BASE_URL is not configured.", 0);
   }
 
-  return base.replace(/\/+$/, "");
+  return base;
 }
 
-function detailToMessage(detail, fallback) {
+// Used when an error reply has no usable "detail" (empty body, HTML from a proxy, ...).
+export function fallbackMessage(status) {
+  if (status === 403) return "You do not have permission to do this (HTTP 403).";
+  if (status === 409) return "The request conflicts with the current state (HTTP 409).";
+  if (status === 422) return "The request was rejected as invalid (HTTP 422).";
+  return `Request failed (HTTP ${status}).`;
+}
+
+export function detailToMessage(detail, fallback) {
   if (typeof detail === "string") return detail;
 
   // FastAPI 422: [{ loc, msg, type }, ...]
@@ -60,10 +83,11 @@ export function clearSession() {
 /**
  * @param {string} path  e.g. "/projects"
  * @param {{ method?: string, json?: unknown, formData?: FormData,
- *           signal?: AbortSignal, auth?: boolean }} options
+ *           signal?: AbortSignal, auth?: boolean, base?: string }} options
+ *   `base` overrides VITE_API_BASE_URL (used by tests; callers normally omit it).
  */
 export async function authedFetch(path, options = {}) {
-  const { method = "GET", json, formData, signal, auth = true, responseType } = options;
+  const { method = "GET", json, formData, signal, auth = true, responseType, base } = options;
 
   const headers = {};
 
@@ -85,7 +109,7 @@ export async function authedFetch(path, options = {}) {
   let response;
 
   try {
-    response = await fetch(`${baseUrl()}${path}`, {
+    response = await fetch(`${base === undefined ? baseUrl() : normalizeBase(base)}${path}`, {
       method,
       headers,
       body,
@@ -135,7 +159,7 @@ export async function authedFetch(path, options = {}) {
     throw new ApiError(
       detailToMessage(
         data?.detail,
-        `Request failed (HTTP ${response.status}).`
+        fallbackMessage(response.status)
       ),
       response.status,
       data?.detail
@@ -182,7 +206,7 @@ export async function authedStream(path, { signal, headers: extraHeaders = {} } 
     }
 
     throw new ApiError(
-      detailToMessage(data?.detail, `Request failed (HTTP ${response.status}).`),
+      detailToMessage(data?.detail, fallbackMessage(response.status)),
       response.status,
       data?.detail
     );

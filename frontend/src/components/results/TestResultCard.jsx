@@ -35,10 +35,15 @@ function StepRow({ step, projectId, runId }) {
   );
 }
 
-export default function TestResultCard({ test, projectId, runId }) {
+export default function TestResultCard({ test, projectId, runId, framework }) {
   const [open, setOpen] = useState(false);
   const duration = formatSeconds(test.duration_seconds);
   const steps = test.steps || [];
+  const playwright = framework === "playwright";
+  // Playwright attaches screenshots to the test, not to a step. Anything already shown under a
+  // step is not repeated. Bytes come through the authenticated screenshot endpoint.
+  const shownInSteps = new Set(steps.flatMap((step) => (step.screenshots || []).map((shot) => shot.id)));
+  const testShots = playwright ? (test.screenshots || []).filter((shot) => !shownInSteps.has(shot.id)) : [];
   const panelId = `test-${test.id}-panel`;
   const Chevron = open ? ChevronDown : ChevronRight;
 
@@ -78,7 +83,19 @@ export default function TestResultCard({ test, projectId, runId }) {
               ))}
             </ol>
           ) : (
-            <p className="home-test-meta">No steps were recorded for this test.</p>
+            <p className="home-test-meta">
+              {playwright
+                ? "Playwright reports results per test; step details are not recorded."
+                : "No steps were recorded for this test."}
+            </p>
+          )}
+
+          {testShots.length > 0 && (
+            <div className="home-step-shots" aria-label="Test screenshots">
+              {testShots.map((shot) => (
+                <ScreenshotThumb key={shot.id} projectId={projectId} runId={runId} screenshot={shot} />
+              ))}
+            </div>
           )}
         </div>
       )}

@@ -8,6 +8,8 @@ import StartedRunCard from "../../components/StartedRunCard.jsx";
 import { createRun, getRun, getRuns, startRun } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 import { formatDateTime } from "../../utils/format.js";
+import { frameworkLabel } from "../../utils/framework.js";
+import { runStateChanged } from "../../utils/runStatus.js";
 
 const NOT_FOUND = "Project or Run not found.";
 const RECENT_RUNS = 5;
@@ -76,17 +78,21 @@ export default function ProjectRunPage() {
       await load();
     } catch (err) {
       if (err?.status === 409) {
-        // Someone else started/cancelled it first: show the server's state,
-        // never "started".
+        // 409 does not always mean "someone else got there first". Only when the run really
+        // changed do we show the server's state; otherwise (e.g. the runtime is unavailable)
+        // the run stays pending and the backend's own message is shown below. Never retried
+        // automatically.
         try {
           const fresh = await getRun(project.id, run.id);
-          setPending(null);
-          setConfirming(false);
-          setActionError("");
-          setNotice(`Run #${run.id}: run state has changed. Showing the latest status.`);
-          addStarted(fresh);
-          await load();
-          return;
+          if (runStateChanged(run, fresh)) {
+            setPending(null);
+            setConfirming(false);
+            setActionError("");
+            setNotice(`Run #${run.id}: run state has changed. Showing the latest status.`);
+            addStarted(fresh);
+            await load();
+            return;
+          }
         } catch {
           /* fall through to the error below */
         }
@@ -155,6 +161,7 @@ export default function ProjectRunPage() {
           <h4>Run using current project configuration</h4>
           <dl className="home-config-card">
             <div><dt>Project</dt><dd>{project.name}</dd></div>
+            <div><dt>Framework</dt><dd>{frameworkLabel(project)}</dd></div>
             <div><dt>Browser</dt><dd>{project.browser}</dd></div>
             <div><dt>Frequency (project setting)</dt><dd>{project.frequency}</dd></div>
           </dl>
@@ -250,13 +257,14 @@ export default function ProjectRunPage() {
         <div className="home-table-wrap">
           <table className="home-table">
             <thead>
-              <tr><th>Run</th><th>Status</th><th>Browser</th><th>Created</th></tr>
+              <tr><th>Run</th><th>Status</th><th>Framework</th><th>Browser</th><th>Created</th></tr>
             </thead>
             <tbody>
               {list.runs.map((run) => (
                 <tr key={run.id}>
                   <td><Link to={runPath(run)}>#{run.id}</Link></td>
                   <td><RunStatusBadge status={run.status} /></td>
+                  <td>{frameworkLabel(run)}</td>
                   <td>{run.browser}</td>
                   <td>{formatDateTime(run.created_at)}</td>
                 </tr>

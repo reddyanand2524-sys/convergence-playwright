@@ -11,15 +11,23 @@ export function createRun(projectId) {
 // newest first (ordering and all filtering are done by the backend). Empty
 // filters are omitted from the query. A bare array (old contract) is wrapped so
 // callers always see one shape; anything else is rejected.
-export async function getRuns(
-  projectId,
-  { page = 1, pageSize = 20, status, browser, runId, createdFrom, createdTo, search } = {},
-  signal
-) {
+// Also filterable by framework ("selenium" | "playwright"); omitted when empty, like the others.
+export function buildRunsQuery({
+  page = 1,
+  pageSize = 20,
+  status,
+  browser,
+  framework,
+  runId,
+  createdFrom,
+  createdTo,
+  search,
+} = {}) {
   const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
   const optional = {
     status,
     browser,
+    framework,
     run_id: runId,
     created_from: createdFrom,
     created_to: createdTo,
@@ -29,9 +37,12 @@ export async function getRuns(
     const text = value === undefined || value === null ? "" : String(value).trim();
     if (text) query.set(key, text);
   });
+  return query;
+}
 
-  const data = await authedFetch(`/projects/${projectId}/runs?${query}`, { signal });
-
+// Normalizes the list reply to { items, page, page_size, total, total_pages }. `page` and
+// `pageSize` are the values that were requested, used when the reply omits its own.
+export function normalizeRunsPage(data, page = 1, pageSize = 20) {
   if (Array.isArray(data)) {
     return { items: data, page: 1, page_size: data.length, total: data.length, total_pages: 1 };
   }
@@ -50,6 +61,14 @@ export async function getRuns(
   throw new ApiError("The backend returned an unexpected response.", 500, null);
 }
 
+export async function getRuns(projectId, options = {}, signal) {
+  const { page = 1, pageSize = 20 } = options;
+  const query = buildRunsQuery(options);
+
+  const data = await authedFetch(`/projects/${projectId}/runs?${query}`, { signal });
+  return normalizeRunsPage(data, page, pageSize);
+}
+
 // GET /projects/{project_id}/runs/{run_id}
 export function getRun(projectId, runId, signal) {
   return authedFetch(`/projects/${projectId}/runs/${runId}`, { signal });
@@ -59,62 +78,33 @@ export function getRun(projectId, runId, signal) {
 // No request body: the backend uses the run's own browser snapshot.
 // Returns the RunResponse (normally RUNNING); execution continues on the
 // backend, so this does NOT mean the run has finished.
-export async function startRun(projectId, runId) {
-  try {
-    return await authedFetch(`/projects/${projectId}/runs/${runId}/start`, {
-      method: "POST",
-    });
-  } catch (err) {
-    if (err?.status === 409) {
-      throw new ApiError(
-        "Run state has changed. Refreshing the latest status.",
-        409,
-        err.detail
-      );
-    }
-    throw err;
-  }
+// A 409 keeps the backend's own message: it can mean the run was already started or
+// cancelled, or that the framework's runtime is unavailable. Callers re-fetch the run
+// to tell which (see runStateChanged).
+export function startRun(projectId, runId) {
+  return authedFetch(`/projects/${projectId}/runs/${runId}/start`, {
+    method: "POST",
+  });
 }
 
 // POST /projects/{project_id}/runs/{run_id}/retry   (no body, 201)
 // Creates a NEW QUEUED run from a COMPLETED/FAILED one. It is not started,
 // and the original run is left untouched.
-export async function retryRun(projectId, runId) {
-  try {
-    return await authedFetch(`/projects/${projectId}/runs/${runId}/retry`, {
-      method: "POST",
-    });
-  } catch (err) {
-    if (err?.status === 409) {
-      throw new ApiError(
-        "This run cannot be retried in its current state.",
-        409,
-        err.detail
-      );
-    }
-    throw err;
-  }
+// A 409 keeps the backend's own message (wrong state, unavailable runtime, ...).
+export function retryRun(projectId, runId) {
+  return authedFetch(`/projects/${projectId}/runs/${runId}/retry`, {
+    method: "POST",
+  });
 }
 
 // POST /projects/{project_id}/runs/{run_id}/cancel   (no body)
 // QUEUED -> returns CANCELLED. RUNNING -> may still return RUNNING with
 // cancel_requested=true; the run only becomes CANCELLED once the backend has
 // stopped it, so callers must keep polling.
-export async function cancelRun(projectId, runId) {
-  try {
-    return await authedFetch(`/projects/${projectId}/runs/${runId}/cancel`, {
-      method: "POST",
-    });
-  } catch (err) {
-    if (err?.status === 409) {
-      throw new ApiError(
-        "Run state has changed. Refreshing the latest status.",
-        409,
-        err.detail
-      );
-    }
-    throw err;
-  }
+export function cancelRun(projectId, runId) {
+  return authedFetch(`/projects/${projectId}/runs/${runId}/cancel`, {
+    method: "POST",
+  });
 }
 
 // GET /projects/{project_id}/runs/{run_id}/results

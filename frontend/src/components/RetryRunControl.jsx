@@ -4,6 +4,7 @@ import { RotateCcw } from "lucide-react";
 
 import { getRun, retryRun } from "../services/runsApi.js";
 import { describeError } from "../services/authedFetch.js";
+import { isRetryable, runStateChanged } from "../utils/runStatus.js";
 
 const NOT_FOUND = "Project or Run not found.";
 
@@ -22,7 +23,7 @@ export default function RetryRunControl({ projectId, run, onUpdate }) {
 
   // Not retryable (e.g. the run turned out not to be terminal): hide the button
   // but keep the explanation for a refused attempt.
-  if (run.status !== "FAILED" && run.status !== "COMPLETED") {
+  if (!isRetryable(run.status)) {
     return info ? <p className="home-notice is-info" role="status">{info}</p> : null;
   }
 
@@ -51,9 +52,12 @@ export default function RetryRunControl({ projectId, run, onUpdate }) {
         // The run is not in the state we displayed: show the server's state.
         try {
           const fresh = await getRun(projectId, run.id);
-          setOpen(false);
-          setInfo("Run state has changed. Showing the latest status.");
-          onUpdate(fresh);
+          // Only when the run really changed; otherwise the dialog keeps the backend's message.
+          if (runStateChanged(run, fresh)) {
+            setOpen(false);
+            setInfo("Run state has changed. Showing the latest status.");
+            onUpdate(fresh);
+          }
         } catch {
           /* keep the 409 message in the dialog */
         }

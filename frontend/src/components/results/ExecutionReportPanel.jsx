@@ -7,6 +7,7 @@ import LoadingState from "../brand/LoadingState.jsx";
 import { getExecutionReport } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 import { formatDateTime } from "../../utils/format.js";
+import { describeReportError, reportStepView } from "../../utils/reportStep.js";
 
 const formatMs = (ms) => {
   if (ms === null || ms === undefined) return null;
@@ -19,31 +20,31 @@ const toShot = (path, reason) => ({
   capture_reason: reason,
 });
 
-function StepRow({ step, projectId, runId }) {
-  const duration = formatMs(step.executionTimeMs);
+// Every field of a report step is optional; reportStepView supplies the display values.
+function StepRow({ step, index, projectId, runId }) {
+  const view = reportStepView(step, index);
+  const duration = formatMs(view.executionTimeMs);
   return (
     <li className="home-step" data-testid="report-step">
       <div className="home-step-head">
-        <span className="home-step-no">Step {step.stepNumber}</span>
-        <strong className="home-step-action">{step.command.toUpperCase()}</strong>
-        <ResultStatus status={step.status} />
-        {!step.attempted && <span className="home-step-time">not attempted</span>}
+        <span className="home-step-no">Step {view.number}</span>
+        <strong className="home-step-action">{view.label}</strong>
+        <ResultStatus status={view.status} />
+        {view.notAttempted && <span className="home-step-time">not attempted</span>}
         {duration && <span className="home-step-time">{duration}</span>}
       </div>
-      <p className="home-step-target">{step.stepName}</p>
-      {step.value && <p className="home-step-value">Value: {step.value}</p>}
-      {step.error && (
-        <p className="home-step-error">
-          {step.error.type} ({step.error.category}): {step.error.message}
-        </p>
+      {view.name && <p className="home-step-target">{view.name}</p>}
+      {view.value && <p className="home-step-value">Value: {view.value}</p>}
+      {view.hasError && (
+        <p className="home-step-error">{view.errorText || "Error details were not recorded."}</p>
       )}
-      {step.skipReason && <p className="home-step-value">Skipped: {step.skipReason}</p>}
-      {step.screenshot && (
+      {view.skipReason && <p className="home-step-value">Skipped: {view.skipReason}</p>}
+      {view.screenshot && (
         <div className="home-step-shots">
           <ScreenshotThumb
             projectId={projectId}
             runId={runId}
-            screenshot={toShot(step.screenshot, step.status === "FAILED" ? "STEP_FAILURE" : "STEP")}
+            screenshot={toShot(view.screenshot, view.status === "FAILED" ? "STEP_FAILURE" : "STEP")}
           />
         </div>
       )}
@@ -56,7 +57,7 @@ function StepRow({ step, projectId, runId }) {
  * every defined step's final state, pages visited, attempts and the raw JSON.
  * Everything shown comes from the response; nothing is hard-coded.
  */
-export default function ExecutionReportPanel({ projectId, runId }) {
+export default function ExecutionReportPanel({ projectId, runId, framework }) {
   // status: "loading" | "ready" | "missing" | "error"
   const [state, setState] = useState({ status: "loading", report: null, error: "" });
   const [open, setOpen] = useState(false);
@@ -93,7 +94,13 @@ export default function ExecutionReportPanel({ projectId, runId }) {
   }
 
   const { report } = state;
-  const { summary } = report;
+  // Playwright reports may omit step-level data; never assume it is there.
+  const summary = report.summary || {};
+  const steps = report.steps || [];
+  const reportErrors = report.errors || [];
+  const pages = report.pages || [];
+  const attempts = report.attempts || [];
+  const engine = report.metadata?.executionEngine;
   const Chevron = open ? ChevronDown : ChevronRight;
   const items = [
     { label: "Total steps", value: summary.totalSteps },
@@ -104,7 +111,7 @@ export default function ExecutionReportPanel({ projectId, runId }) {
     // Optional (absent in older stored reports).
     ...(summary.notRunSteps != null ? [{ label: "Not run", value: summary.notRunSteps, kind: "skip" }] : []),
     { label: "Pages", value: summary.totalPages },
-  ];
+  ].filter((item) => item.value !== undefined && item.value !== null);
 
   return (
     <section className="home-test-card" aria-label="Execution report">
@@ -131,6 +138,13 @@ export default function ExecutionReportPanel({ projectId, runId }) {
             Started {formatDateTime(report.startTime)} · schema v{report.reportVersion}
           </p>
           <p className="home-step-value">{report.actualOutcome}</p>
+          {engine && (
+            <p className="home-step-value">
+              Engine recorded in report: {engine}
+              {framework === "playwright" && String(engine).toLowerCase() === "selenium" &&
+                " (reports stored before engine tagging may say selenium for a Playwright run)"}
+            </p>
+          )}
 
           <dl className="home-result-summary" aria-label="Report summary">
             {items.map((item) => (
@@ -141,15 +155,15 @@ export default function ExecutionReportPanel({ projectId, runId }) {
             ))}
           </dl>
 
-          {report.errors.length > 0 && (
+          {reportErrors.length > 0 && (
             <>
-              <h4>Errors ({report.errors.length})</h4>
+              <h4>Errors ({reportErrors.length})</h4>
               <ul className="home-step-list">
-                {report.errors.map((err, i) => (
+                {reportErrors.map((err, i) => (
                   <li key={i} className="home-step">
                     <p className="home-step-error">
-                      {err.stepNumber ? `Step ${err.stepNumber} — ` : ""}
-                      {err.type} ({err.category}): {err.message}
+                      {err?.stepNumber ? `Step ${err.stepNumber} — ` : ""}
+                      {describeReportError(err) || "Error details were not recorded."}
                     </p>
                   </li>
                 ))}
@@ -157,32 +171,44 @@ export default function ExecutionReportPanel({ projectId, runId }) {
             </>
           )}
 
-          <h4>Steps</h4>
-          <ol className="home-step-list">
-            {report.steps.map((step) => (
-              <StepRow key={`${step.testId}-${step.stepNumber}`} step={step} projectId={projectId} runId={runId} />
-            ))}
-          </ol>
+          {steps.length > 0 || framework !== "playwright" ? (
+            <>
+              <h4>Steps</h4>
+              <ol className="home-step-list">
+                {steps.map((step, index) => (
+                  <StepRow
+                    key={`${step?.testId}-${step?.stepNumber}-${index}`}
+                    step={step}
+                    index={index}
+                    projectId={projectId}
+                    runId={runId}
+                  />
+                ))}
+              </ol>
+            </>
+          ) : (
+            <p className="home-step-value">This Playwright report has no step details.</p>
+          )}
 
-          {report.pages.length > 0 && (
+          {pages.length > 0 && (
             <>
               <h4>Pages</h4>
               <ul className="home-step-list">
-                {report.pages.map((page) => (
+                {pages.map((page) => (
                   <li key={page.pageId} className="home-step">
                     <strong>{page.pageId}</strong> {page.pageTitle ? `${page.pageTitle} — ` : ""}
-                    {page.url || "URL not recorded"} · {page.events.length} event(s)
+                    {page.url || "URL not recorded"} · {(page.events || []).length} event(s)
                   </li>
                 ))}
               </ul>
             </>
           )}
 
-          {report.attempts.length > 0 && (
+          {attempts.length > 0 && (
             <>
               <h4>Attempts</h4>
               <ul className="home-step-list">
-                {report.attempts.map((attempt) => (
+                {attempts.map((attempt) => (
                   <li key={attempt.attemptNumber} className="home-step">
                     Attempt {attempt.attemptNumber}: <ResultStatus status={attempt.status} />{" "}
                     {formatMs(attempt.executionTimeMs)}

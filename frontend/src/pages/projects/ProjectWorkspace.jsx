@@ -5,6 +5,7 @@ import LoadingState from "../../components/brand/LoadingState.jsx";
 
 import { getProject } from "../../services/projectsApi.js";
 import { describeError } from "../../services/authedFetch.js";
+import { frameworkLabel } from "../../utils/framework.js";
 
 /*
  * /projects/:projectId
@@ -97,7 +98,7 @@ export default function ProjectWorkspace() {
       <span className="home-eyebrow">Project</span>
       <h2>{project.name}</h2>
       <p className="home-page-description">
-        {project.browser} · {project.frequency}
+        {frameworkLabel(project)} · {project.browser} · {project.frequency}
       </p>
 
       <nav className="home-tabs" aria-label="Project sections">

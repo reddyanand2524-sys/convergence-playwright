@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, ListChecks, Loader, OctagonX, XCircle } from "lucide-react";
+import { AlertTriangle, Ban, CheckCircle2, ChevronDown, ChevronRight, Clock, ListChecks, Loader, OctagonX, XCircle } from "lucide-react";
 
 import {
   STATUS_LABEL,
@@ -21,7 +21,9 @@ import { describeStep, failureSummary } from "../utils/stepDescription.js";
  *
  * Props: timeline (from useRunEvents), connection, error, runStatus (the page's
  * polled run.status, used for the final outcome if the stream has not delivered it),
- * resultsHref (optional; where the failure analysis lives, offered on failed steps).
+ * resultsHref (optional; where the failure analysis lives, offered on failed steps),
+ * framework ("playwright" switches to the test-level view below; anything else is the
+ * Selenium step timeline, unchanged).
  */
 const ICONS = { RUNNING: Loader, PASSED: CheckCircle2, FAILED: XCircle, INTERRUPTED: OctagonX };
 
@@ -93,7 +95,94 @@ function StepRow({ row, resultsHref }) {
   );
 }
 
-export default function StepTimeline({ timeline, connection, error, runStatus, resultsHref }) {
+// Playwright runs publish test-level events only (test_started / test_finished): there are no
+// step events, so this view lists tests and their outcome and never waits for steps.
+const TEST_ICONS = {
+  RUNNING: Loader,
+  PASSED: CheckCircle2,
+  FAILED: XCircle,
+  ERROR: XCircle,
+  SKIPPED: Ban,
+  INTERRUPTED: OctagonX,
+};
+
+function TestRow({ test }) {
+  const Icon = TEST_ICONS[test.status] || Clock;
+  const duration = formatStepDuration(test.duration);
+
+  return (
+    <li
+      className={`cv-timeline-row is-${String(test.status).toLowerCase()}`}
+      aria-current={test.status === "RUNNING" ? "step" : undefined}
+    >
+      <div className="cv-timeline-main">
+        <Icon className="cv-timeline-icon" size={16} aria-hidden="true" />
+        <span className="cv-timeline-name">
+          <strong className="cv-timeline-title">{test.name || test.id}</strong>
+        </span>
+        <span className="cv-timeline-status">{STATUS_LABEL[test.status] || test.status}</span>
+        {duration && <span className="cv-timeline-duration">{duration}</span>}
+      </div>
+    </li>
+  );
+}
+
+function TestTimeline({ timeline, connection, error, runStatus }) {
+  const outcome = outcomeOf(timeline, runStatus);
+  const ended = Boolean(outcome);
+
+  return (
+    <section className="cv-timeline" aria-label="Live execution progress">
+      <div className="cv-timeline-head">
+        <h4><ListChecks size={16} aria-hidden="true" /> Execution progress</h4>
+        {CONNECTION_LABEL[connection] && !ended && (
+          <span className={`cv-timeline-conn is-${connection}`}>{CONNECTION_LABEL[connection]}</span>
+        )}
+      </div>
+
+      <p className="cv-timeline-note" role="note">
+        Playwright runs report progress per test. Step-by-step events are not available.
+      </p>
+
+      {timeline.gap && (
+        <p className="cv-timeline-note" role="note">
+          <AlertTriangle size={14} aria-hidden="true" /> Some earlier test events are no longer
+          available here. The final results list every test.
+        </p>
+      )}
+
+      {connection === "error" && (
+        <p className="cv-timeline-note is-error" role="alert">
+          {error || "Live updates are unavailable."} The run itself is not affected.
+        </p>
+      )}
+
+      {timeline.tests.length === 0 ? (
+        <p className="cv-timeline-empty" role="status">
+          {ended ? "No test events were recorded for this run." : "Waiting for the first test to start."}
+        </p>
+      ) : (
+        <ol className="cv-timeline-list">
+          {timeline.tests.map((test) => (
+            <TestRow key={test.id} test={test} />
+          ))}
+        </ol>
+      )}
+
+      {outcome && (
+        <p className={`cv-timeline-outcome is-${outcome.type}`} role="status">
+          {outcome.text}
+        </p>
+      )}
+    </section>
+  );
+}
+
+export default function StepTimeline({ timeline, connection, error, runStatus, resultsHref, framework }) {
+  if (framework === "playwright") {
+    return <TestTimeline timeline={timeline} connection={connection} error={error} runStatus={runStatus} />;
+  }
+
   const groups = groupRowsByTest(timeline);
   const named = groups.filter((g) => g.name).length > 1;
   const outcome = outcomeOf(timeline, runStatus);

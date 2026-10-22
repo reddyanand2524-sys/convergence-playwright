@@ -4,15 +4,24 @@ import { Pencil, Trash2 } from "lucide-react";
 
 import { deleteProject, updateProject } from "../../services/projectsApi.js";
 import { describeError } from "../../services/authedFetch.js";
-import { BROWSER_OPTIONS, FREQUENCY_OPTIONS } from "../../constants/projectOptions.js";
+import { FREQUENCY_OPTIONS } from "../../constants/projectOptions.js";
+import { FRAMEWORK_OPTIONS, frameworkLabel, frameworkOf } from "../../utils/framework.js";
+import {
+  browserAfterFrameworkChange,
+  browserOptionsFor,
+  buildProjectPatch,
+} from "../../utils/projectForm.js";
 
-const FIELDS = ["name", "frequency", "browser"];
+const FIELDS = ["name", "frequency", "browser", "framework"];
 
+// A legacy project without a framework is edited as Selenium; that is only the form's
+// starting value - nothing is sent unless the user changes it.
 function toDraft(project) {
   return {
     name: project.name,
     frequency: project.frequency,
     browser: project.browser,
+    framework: frameworkOf(project),
   };
 }
 
@@ -67,7 +76,7 @@ export default function ProjectConfigurationPage() {
   const [deleteError, setDeleteError] = useState("");
   const deleteInFlight = useRef(false);
 
-  const dirty = FIELDS.some((field) => draft[field].trim() !== project[field]);
+  const dirty = Object.keys(buildProjectPatch(project, draft)).length > 0;
 
   function startEdit() {
     setDraft(toDraft(project));
@@ -89,6 +98,17 @@ export default function ProjectConfigurationPage() {
     setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
   }
 
+  // Playwright is Chrome only; going back to Selenium restores a Selenium browser
+  // (the project's own one when it had one).
+  function changeFramework(next) {
+    setDraft((prev) => ({
+      ...prev,
+      framework: next,
+      browser: browserAfterFrameworkChange(next, prev.browser, project),
+    }));
+    setFieldErrors((prev) => ({ ...prev, framework: undefined, browser: undefined }));
+  }
+
   async function save(event) {
     event.preventDefault();
     if (inFlight.current) return;
@@ -99,11 +119,7 @@ export default function ProjectConfigurationPage() {
       return;
     }
 
-    const payload = {};
-    FIELDS.forEach((field) => {
-      const value = draft[field].trim();
-      if (value !== project[field]) payload[field] = value;
-    });
+    const payload = buildProjectPatch(project, draft);
 
     if (Object.keys(payload).length === 0) {
       setEditing(false);
@@ -199,6 +215,7 @@ export default function ProjectConfigurationPage() {
         <dl className="home-config-card">
           <div><dt>Project name</dt><dd>{project.name}</dd></div>
           <div><dt>Frequency</dt><dd>{project.frequency}</dd></div>
+          <div><dt>Framework</dt><dd>{frameworkLabel(project)}</dd></div>
           <div><dt>Browser</dt><dd>{project.browser}</dd></div>
           <div><dt>Project ID</dt><dd>{project.id}</dd></div>
           <div><dt>Status</dt><dd>{project.is_active ? "Active" : "Inactive"}</dd></div>
@@ -234,6 +251,33 @@ export default function ProjectConfigurationPage() {
           </div>
 
           <div className="home-form-field">
+            <label htmlFor="cfg-framework">Framework</label>
+            <select
+              id="cfg-framework"
+              value={draft.framework}
+              disabled={saving}
+              onChange={(event) => changeFramework(event.target.value)}
+            >
+              {withCurrent(
+                FRAMEWORK_OPTIONS.map((option) => option.value),
+                draft.framework
+              ).map((value) => (
+                <option key={value} value={value}>
+                  {FRAMEWORK_OPTIONS.find((option) => option.value === value)?.label ?? value}
+                </option>
+              ))}
+            </select>
+            {draft.framework === "playwright" && (
+              <p className="home-form-hint">
+                Playwright projects run in Chrome only. The server confirms whether the change
+                is allowed when you save (for example it is refused while runs are active or
+                schedules are enabled).
+              </p>
+            )}
+            {fieldErrors.framework && <p className="home-form-error" role="alert">{fieldErrors.framework}</p>}
+          </div>
+
+          <div className="home-form-field">
             <label htmlFor="cfg-browser">Browser</label>
             <select
               id="cfg-browser"
@@ -241,8 +285,8 @@ export default function ProjectConfigurationPage() {
               disabled={saving}
               onChange={(event) => change("browser", event.target.value)}
             >
-              {withCurrent(BROWSER_OPTIONS, project.browser).map((option) => (
-                <option key={option}>{option}</option>
+              {browserOptionsFor(draft.framework, project.browser).map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
             {fieldErrors.browser && <p className="home-form-error" role="alert">{fieldErrors.browser}</p>}

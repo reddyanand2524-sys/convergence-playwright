@@ -1,31 +1,41 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL;
+import { ApiError, authedFetch } from "./authedFetch.js";
 
-async function parseResponse(response, action) {
-  const text = await response.text();
+/*
+ * Public (unauthenticated) auth calls. They go through the shared authedFetch
+ * with auth:false, so they get the same base-URL normalisation, network-failure
+ * handling (ApiError.status === 0) and FastAPI error parsing - including 422
+ * arrays - as every other API call. No token is sent and a 401 here (e.g. wrong
+ * password) never clears an existing session. Messages are built from the
+ * backend's "detail" only; request bodies are never echoed.
+ */
 
-  if (!text.trim()) {
-    throw new Error(
-      `${action} failed: the backend returned an empty response. Make sure the FastAPI backend is running.`
-    );
-  }
+const BACKEND_HINT = "Make sure the FastAPI backend is running.";
 
+// `request` is injectable for tests.
+export async function publicRequest(path, action, options, request = authedFetch) {
   let data;
 
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `${action} failed: the backend returned an invalid response. Make sure the FastAPI backend is running.`
-    );
+    data = await request(path, { ...options, auth: false });
+  } catch (err) {
+    if (err instanceof ApiError && err.status > 0 && (err.detail === undefined || err.detail === null)) {
+      // The reply had no FastAPI "detail": a proxy error page, or an empty body.
+      throw new ApiError(
+        err.status >= 500
+          ? `${action} failed: the backend returned an invalid response (HTTP ${err.status}). ${BACKEND_HINT}`
+          : `${action} failed (HTTP ${err.status}).`,
+        err.status,
+        err.detail
+      );
+    }
+    throw err;
   }
 
-  if (!response.ok) {
-    const detail = data?.detail;
-
-    throw new Error(
-      typeof detail === "string"
-        ? detail
-        : `${action} failed (HTTP ${response.status}).`
+  if (data === null || typeof data !== "object") {
+    throw new ApiError(
+      `${action} failed: the backend returned an empty or invalid response. ${BACKEND_HINT}`,
+      502,
+      null
     );
   }
 
@@ -38,86 +48,43 @@ async function parseResponse(response, action) {
 // ============================================================
 
 // REGISTER
-export async function registerUser(data) {
-  return parseResponse(
-    await fetch(
-      `${API_BASE}/auth/register`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(data),
-      }
-    ),
-    "Registration"
-  );
+export function registerUser(data) {
+  return publicRequest("/auth/register", "Registration", {
+    method: "POST",
+    json: data,
+  });
 }
 
 
 // LOGIN
-export async function loginUser(
-  email,
-  password,
-  signal
-) {
-  return parseResponse(
-    await fetch(
-      `${API_BASE}/auth/login`,
-      {
-        signal,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email,
-          password,
-        }),
-      }
-    ),
-    "Login"
-  );
+export function loginUser(email, password, signal) {
+  return publicRequest("/auth/login", "Login", {
+    method: "POST",
+    json: { email, password },
+    signal,
+  });
 }
 
 
 // FORGOT PASSWORD
-export async function forgotPassword(
-  email
-) {
-  return parseResponse(
-    await fetch(
-      `${API_BASE}/auth/forgot-password?email=${encodeURIComponent(email)}`,
-      {
-        method: "POST",
-      }
-    ),
-    "Forgot password"
+// The backend takes the email as a query parameter; that contract is unchanged.
+export function forgotPassword(email) {
+  return publicRequest(
+    `/auth/forgot-password?email=${encodeURIComponent(email)}`,
+    "Forgot password",
+    { method: "POST" }
   );
 }
 
 
 // RESET PASSWORD
-export async function resetPassword(
-  token,
-  newPassword,
-  confirmPassword
-) {
-  return parseResponse(
-    await fetch(
-      `${API_BASE}/auth/reset-password`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          token,
-          new_password: newPassword,
-          confirm_password: confirmPassword,
-        }),
-      }
-    ),
-    "Reset password"
-  );
+export function resetPassword(token, newPassword, confirmPassword) {
+  return publicRequest("/auth/reset-password", "Reset password", {
+    method: "POST",
+    json: {
+      token,
+      new_password: newPassword,
+      confirm_password: confirmPassword,
+    },
+  });
 }

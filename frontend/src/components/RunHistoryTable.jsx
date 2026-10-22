@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 
 import RunStatusBadge from "./RunStatusBadge.jsx";
 import { formatDateTime, formatSeconds } from "../utils/format.js";
+import { frameworkLabel } from "../utils/framework.js";
 
 // Counts can be null for runs that have no results yet; show a dash, not a 0.
 const count = (value) => (value === null || value === undefined ? "-" : value);
@@ -15,6 +16,7 @@ export default function RunHistoryTable({ projectId, runs }) {
           <tr>
             <th>Run</th>
             <th>Status</th>
+            <th>Framework</th>
             <th>Browser</th>
             <th>Created</th>
             <th>Started</th>
@@ -32,6 +34,7 @@ export default function RunHistoryTable({ projectId, runs }) {
             <tr key={run.id}>
               <td><Link to={`/projects/${projectId}/runs/${run.id}`}>#{run.id}</Link></td>
               <td><RunStatusBadge status={run.status} /></td>
+              <td>{frameworkLabel(run)}</td>
               <td>{run.browser}</td>
               <td>{formatDateTime(run.created_at, "-")}</td>
               <td>{formatDateTime(run.started_at, "-")}</td>

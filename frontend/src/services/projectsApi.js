@@ -1,17 +1,29 @@
-import { authedFetch } from "./authedFetch.js";
+import { ApiError, authedFetch } from "./authedFetch.js";
+import { buildCreatePayload } from "../utils/projectForm.js";
+
+// The backend returns the projects as a bare JSON array (possibly empty). Anything else is a
+// malformed reply and is reported, not shown as "no projects".
+export function normalizeProjectList(data) {
+  if (!Array.isArray(data)) {
+    throw new ApiError("The backend returned an unexpected response.", 500, null);
+  }
+  return data;
+}
 
 // GET /projects
-export function listProjects(signal) {
-  return authedFetch("/projects", { signal });
+export async function listProjects(signal) {
+  return normalizeProjectList(await authedFetch("/projects", { signal }));
 }
 
 // POST /projects
-// Backend CreateProjectRequest: name (2-150), frequency (1-50), browser (1-30).
-// All three are required and accepted by the current backend.
-export function createProject({ name, frequency, browser }) {
+// Backend CreateProjectRequest: name (2-150), frequency (1-50), browser (1-30) and an
+// optional framework ("selenium" | "playwright"; the backend defaults to Selenium when it
+// is left out). Playwright projects use the browser "chrome". The backend may refuse with
+// 403 / 409 / 422 and a "detail" message, which the caller shows as is.
+export function createProject({ name, frequency, browser, framework }) {
   return authedFetch("/projects", {
     method: "POST",
-    json: { name, frequency, browser },
+    json: buildCreatePayload({ name, frequency, browser, framework }),
   });
 }
 
@@ -20,7 +32,8 @@ export function getProject(projectId, signal) {
   return authedFetch(`/projects/${projectId}`, { signal });
 }
 
-// PATCH /projects/{project_id}  (partial: name, frequency, browser)
+// PATCH /projects/{project_id}  (partial: name, frequency, browser, framework)
+// 409 when a framework change is refused (enabled schedules, queued/running runs).
 export function updateProject(projectId, payload) {
   return authedFetch(`/projects/${projectId}`, {
     method: "PATCH",

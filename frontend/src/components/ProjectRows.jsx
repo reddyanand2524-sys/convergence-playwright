@@ -1,6 +1,8 @@
 import { Link } from "react-router-dom";
 import { FolderPlus } from "lucide-react";
 
+import { frameworkLabel } from "../utils/framework.js";
+
 /* Project list rows; each row opens /projects/:projectId. */
 export default function ProjectRows({ projects, large = false }) {
   return (
@@ -16,7 +18,7 @@ export default function ProjectRows({ projects, large = false }) {
           </span>
           <strong>{project.name}</strong>
           <span>
-            {project.frequency} · {project.browser}
+            {frameworkLabel(project)} · {project.frequency} · {project.browser}
           </span>
         </Link>
       ))}

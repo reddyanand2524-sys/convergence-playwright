@@ -10,7 +10,7 @@ import { getRuns } from "../../services/runsApi.js";
 import { describeError } from "../../services/authedFetch.js";
 
 const PAGE_SIZE = 20; // backend default
-const FILTER_KEYS = Object.keys(EMPTY_FILTERS); // search, status, browser, run_id, created_from, created_to
+const FILTER_KEYS = Object.keys(EMPTY_FILTERS); // search, status, browser, framework, run_id, created_from, created_to
 
 function pageFromParams(params) {
   const n = Number.parseInt(params.get("page") || "1", 10);
@@ -18,7 +18,7 @@ function pageFromParams(params) {
 }
 
 /*
- * /projects/:projectId/history?page=N&status=...&browser=...&run_id=...
+ * /projects/:projectId/history?page=N&status=...&browser=...&framework=...&run_id=...
  *                              &created_from=...&created_to=...&search=...
  * The URL is the single source of truth for page and filters, so refresh, Back,
  * Forward and shared links all restore the same view. Every change is a new
@@ -62,6 +62,7 @@ export default function RunHistoryPage() {
             pageSize: PAGE_SIZE,
             status: filters.status,
             browser: filters.browser,
+            framework: filters.framework,
             runId: filters.run_id,
             createdFrom: filters.created_from,
             createdTo: filters.created_to,
